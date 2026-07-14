@@ -11,8 +11,6 @@ import {
   reorderProviders,
   checkBgModel,
   downloadBgModel,
-  setConfig,
-  getConfig,
   type ProviderEntry,
   type ProviderUpsertRequest,
 } from '../api/client'
@@ -21,10 +19,15 @@ const providers = ref<ProviderEntry[]>([])
 const loading = ref(false)
 
 // 抠图设置
-const hasModel = ref(false)
-const modelDownPct = ref(0)
-const modelDownloading = ref(false)
-const bgThreshold = ref(0.5)
+const bgModelId = ref('crispcut-quality')
+const bgDownloading = ref('')
+const bgDownPct = ref(0)
+const bgModels = [
+  { id: 'crispcut-quality', name: 'CrispCut（推荐）', size: '约 25MB' },
+  { id: 'crispcut-fast', name: 'CrispCut-快速版', size: '约 6.5MB' },
+  { id: 'rmbg-1.4', name: 'RMBG-1.4', size: '约 40MB' },
+  { id: 'rmbg-2.0', name: 'RMBG-2.0', size: '约 176MB' },
+]
 
 // 编辑对话框
 const dialogVisible = ref(false)
@@ -200,54 +203,40 @@ async function handleToggle(row: ProviderEntry) {
 
 async function loadBgSettings() {
   try {
-    hasModel.value = await checkBgModel()
-  } catch { /* ignore */ }
-  try {
-    const cfg = await getConfig()
-    if (cfg?.bg_threshold) {
-      bgThreshold.value = parseFloat(cfg.bg_threshold)
-    }
-  } catch { /* use default */ }
+    const r = await checkBgModel()
+    bgModelId.value = r.model || 'rmbg-1.4'
+  } catch { /* */ }
 }
 
-async function handleImportModel() {
+async function selectModel(id: string) {
+  bgModelId.value = id
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('set_config', { key: 'bg_model', value: id })
+  ElMessage.success(`已切换为 ${bgModels.find(m => m.id === id)?.name}`)
+}
+
+async function downloadModel(id: string) {
+  bgDownloading.value = id; bgDownPct.value = 0
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('set_config', { key: 'bg_model', value: id })
+    await downloadBgModel((pct: number) => { bgDownPct.value = Math.round(pct) })
+    bgModelId.value = id
+    ElMessage.success('下载完成，已自动启用')
+  } catch (e: any) { ElMessage.error('下载失败：' + (e?.message || e)) }
+  finally { bgDownloading.value = '' }
+}
+
+async function importModel(id: string) {
   try {
     const { open } = await import('@tauri-apps/plugin-dialog')
     const { invoke } = await import('@tauri-apps/api/core')
-    const selected = await open({
-      filters: [{ name: 'ONNX 模型', extensions: ['onnx'] }],
-      multiple: false,
-    })
+    const selected = await open({ filters: [{ name: 'ONNX 模型', extensions: ['onnx'] }], multiple: false })
     if (!selected) return
-    const path = typeof selected === 'string' ? selected : selected.path
-    await invoke('import_bg_model', { sourcePath: path })
-    hasModel.value = true
-    ElMessage.success('模型已导入')
-  } catch (e: any) {
-    ElMessage.error(`导入失败：${e?.message || e}`)
-  }
-}
-
-async function handleDownloadModel() {
-  modelDownloading.value = true
-  modelDownPct.value = 0
-  try {
-    await downloadBgModel((pct) => {
-      modelDownPct.value = Math.round(pct)
-    })
-    hasModel.value = true
-    ElMessage.success('模型下载完成')
-  } catch (e: any) {
-    ElMessage.error(`下载失败：${e?.message || e}`)
-  } finally {
-    modelDownloading.value = false
-  }
-}
-
-async function handleThresholdChange(val: number) {
-  try {
-    await setConfig('bg_threshold', String(val))
-  } catch { /* ignore */ }
+    await invoke('import_bg_model', { sourcePath: selected as string, modelId: id })
+    bgModelId.value = id
+    ElMessage.success('模型已导入，已自动启用')
+  } catch (e: any) { ElMessage.error('导入失败：' + (e?.message || e)) }
 }
 </script>
 
@@ -287,59 +276,26 @@ async function handleThresholdChange(val: number) {
       </el-tab-pane>
 
       <el-tab-pane label="抠图" lazy>
-        <el-card>
-          <template #header>抠图模型</template>
-          <el-descriptions :column="1" border>
-            <el-descriptions-item label="模型状态">
-              <el-tag v-if="hasModel" type="success" size="small">已下载</el-tag>
-              <el-tag v-else type="info" size="small">未下载</el-tag>
-            </el-descriptions-item>
-            <el-descriptions-item label="模型文件">
-              RMBG-2.0 ONNX
-            </el-descriptions-item>
-            <el-descriptions-item label="管理">
-              <el-button
-                size="small"
-                :type="hasModel ? 'default' : 'primary'"
-                :loading="modelDownloading"
-                @click="handleDownloadModel"
-              >
-                {{ hasModel ? '重新下载' : '在线下载' }}
+        <div class="bg-model-list">
+          <el-card v-for="m in bgModels" :key="m.id" shadow="hover" class="bg-model-card" :class="{ selected: bgModelId === m.id }">
+            <div class="bg-card-body">
+              <div class="bg-card-row">
+                <span class="bg-card-name">{{ m.name }}</span>
+                <el-tag v-if="bgModelId === m.id" type="success" size="small">使用中</el-tag>
+                <el-tag v-else type="info" size="small">待切换</el-tag>
+              </div>
+              <div class="bg-card-row">大小：{{ m.size }}</div>
+              <el-progress v-if="bgDownloading === m.id" :percentage="bgDownPct" :stroke-width="6" style="margin: 8px 0" />
+            </div>
+            <div class="bg-card-actions">
+              <el-button size="small" @click="downloadModel(m.id)" :loading="bgDownloading === m.id">
+                下载
               </el-button>
-              <el-button size="small" style="margin-left: 8px" @click="handleImportModel">
-                导入本地模型
-              </el-button>
-              <el-progress
-                v-if="modelDownloading"
-                :percentage="modelDownPct"
-                style="margin-top: 8px"
-              />
-            </el-descriptions-item>
-          </el-descriptions>
-        </el-card>
-
-        <el-card style="margin-top: 16px">
-          <template #header>抠图参数</template>
-          <el-form label-position="top">
-            <el-form-item>
-              <template #label>
-                抠图阈值：{{ bgThreshold.toFixed(2) }}
-                <span class="text-muted" style="font-weight: normal; font-size: 12px">
-                  — 越高越激进，抠掉更多边缘
-                </span>
-              </template>
-              <el-slider
-                v-model="bgThreshold"
-                :min="0.1"
-                :max="0.9"
-                :step="0.05"
-                show-stops
-                style="max-width: 400px"
-                @change="handleThresholdChange"
-              />
-            </el-form-item>
-          </el-form>
-        </el-card>
+              <el-button size="small" @click="importModel(m.id)">导入</el-button>
+              <el-button v-if="bgModelId !== m.id" size="small" text type="primary" @click="selectModel(m.id)">选用</el-button>
+            </div>
+          </el-card>
+        </div>
       </el-tab-pane>
 
       <el-tab-pane label="关于" lazy>
@@ -445,4 +401,12 @@ async function handleThresholdChange(val: number) {
 .text-muted {
   color: var(--el-text-color-secondary);
 }
+
+.bg-model-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.bg-model-card { flex: 1; min-width: 0; }
+.bg-model-card.selected { border-color: var(--el-color-primary); }
+.bg-card-body { margin-bottom: 12px; }
+.bg-card-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 14px; }
+.bg-card-name { font-weight: 600; }
+.bg-card-actions { display: flex; gap: 4px; }
 </style>

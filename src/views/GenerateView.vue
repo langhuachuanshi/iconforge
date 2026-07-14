@@ -19,17 +19,15 @@ const providers = ref<ProviderInfo[]>([])
 const templates = ref<Template[]>([])
 const loadingMeta = ref(false)
 
-// 表单状态
 const concept = ref('')
 const selectedStyle = ref('flat-design')
 const selectedProvider = ref('')
 const selectedSize = ref('1024x1024')
-const useCustomPrompt = ref(false)
-const customPrompt = ref('')
+const bgColor = ref('')
+const details = ref('')
+const extraPrompt = ref('')
 
 const generating = ref(false)
-
-// 从 store 读当前图片（切换路由回来仍在）
 const generatedImage = computed(() => workspace.currentImage)
 
 onMounted(async () => {
@@ -38,11 +36,10 @@ onMounted(async () => {
     const [ps, ts] = await Promise.all([getProviders(), getTemplates()])
     providers.value = ps
     templates.value = ts
-    // 默认选第一个已配置 Key 的 Provider，否则选第一个
     const configured = ps.find((p) => p.configured)
     selectedProvider.value = (configured || ps[0])?.name || ''
   } catch {
-    ElMessage.error('加载配置失败，请确认后端已启动')
+    ElMessage.error('加载配置失败')
   } finally {
     loadingMeta.value = false
   }
@@ -52,36 +49,23 @@ const currentProvider = computed(
   () => providers.value.find((p) => p.name === selectedProvider.value) || null
 )
 
-// 当前 Provider 支持的尺寸
 const sizeOptions = computed(() => {
   if (!currentProvider.value) return ['1024x1024']
   const sizes = currentProvider.value.supportedSizes
-  if (!sizes || sizes.length === 0) return ['1024x1024']
-  if (!sizes.includes(selectedSize.value)) {
-    selectedSize.value = sizes[0]
-  }
+  if (!sizes || !sizes.length) return ['1024x1024']
+  if (!sizes.includes(selectedSize.value)) selectedSize.value = sizes[0]
   return sizes
 })
 
-// 当前 Provider 是否已在后端配置 Key
 const keyConfigured = computed(() => currentProvider.value?.configured ?? false)
 
 async function handleGenerate() {
-  if (!concept.value.trim()) {
-    ElMessage.warning('请输入图标概念')
-    return
-  }
-  if (!selectedProvider.value) {
-    ElMessage.warning('请选择 AI 服务商')
-    return
-  }
+  if (!concept.value.trim()) { ElMessage.warning('请输入图标概念'); return }
+  if (!selectedProvider.value) { ElMessage.warning('请选择 AI 服务商'); return }
   if (!keyConfigured.value) {
-    ElMessage.warning(
-      `${currentProvider.value?.displayName} 未配置，请在设置页配置 API Key`
-    )
+    ElMessage.warning(`${currentProvider.value?.displayName} 未配置，请在设置页配置 API Key`)
     return
   }
-
   generating.value = true
   workspace.clear()
   try {
@@ -90,13 +74,12 @@ async function handleGenerate() {
       style: selectedStyle.value,
       size: selectedSize.value,
       provider: selectedProvider.value,
-      custom_prompt: useCustomPrompt.value ? customPrompt.value : undefined,
+      extra: [bgColor.value ? `背景：${bgColor.value}` : '', details.value, extraPrompt.value].filter(Boolean).join('，') || undefined,
     }
-    console.log('[生成] 请求参数:', JSON.stringify(params, null, 2))
+    console.log('[生成] 请求:', JSON.stringify(params, null, 2))
     const result = await generateIcon(params)
-    console.log('[生成] 成功:', result.icon_id)
     workspace.setImage(result.image, result.icon_id)
-    ElMessage.success('生成成功，已自动保存到历史记录')
+    ElMessage.success('生成成功')
   } catch (e: any) {
     console.error('[生成] 失败:', e)
     const detail = typeof e === 'string' ? e : (e?.message || JSON.stringify(e))
@@ -106,194 +89,133 @@ async function handleGenerate() {
   }
 }
 
-function handleSendToEdit() {
+function goEdit() {
   if (!workspace.currentImage) return
   router.push('/edit')
 }
 </script>
 
 <template>
-  <div v-loading="loadingMeta">
+  <div class="gen-root" v-loading="loadingMeta">
     <h2 class="page-title">生成图标</h2>
 
-    <el-row :gutter="24">
-      <!-- 左：配置表单 -->
-      <el-col :xs="24" :md="12">
+    <div class="gen-body">
+      <!-- 画布：预览 -->
+      <div class="canvas-area" v-loading="generating" element-loading-text="AI 正在创作...">
+        <div class="canvas-inner checkerboard" v-if="generatedImage">
+          <img :src="toDataUrl(generatedImage)" class="preview-img" alt="生成的图标" />
+          <el-button type="primary" @click="goEdit" style="margin-top:16px">去编辑导出 →</el-button>
+        </div>
+        <el-empty v-else description="图标将显示在这里" :image-size="120" />
+      </div>
+
+      <!-- 右侧工具栏 -->
+      <div class="side-panel">
         <el-card>
-          <el-form label-position="top">
-            <el-form-item label="图标概念">
-              <el-input
-                v-model="concept"
-                placeholder="描述你要的图标，如：咖啡杯、火箭、邮件"
-                maxlength="500"
-                show-word-limit
-                @keyup.enter="handleGenerate"
-              />
+          <el-form label-position="top" size="default">
+            <!-- Step 1: 主体 -->
+            <div class="step"><span class="step-num">1</span> 图标主题</div>
+            <el-form-item>
+              <el-input v-model="concept" placeholder="例如：咖啡杯、数字090、火箭..." maxlength="200" />
             </el-form-item>
 
-            <el-divider content-position="left">风格</el-divider>
-
-            <el-form-item v-if="!useCustomPrompt" label="选择风格模板">
-              <el-select
-                v-model="selectedStyle"
-                placeholder="选择风格"
-                style="width: 100%"
-              >
-                <el-option
-                  v-for="t in templates"
-                  :key="t.id"
-                  :label="t.name"
-                  :value="t.id"
-                >
-                  <span class="option-name">{{ t.name }}</span>
-                  <span class="option-desc">{{ t.description }}</span>
+            <!-- Step 2: 风格 -->
+            <div class="step"><span class="step-num">2</span> 选择风格</div>
+            <el-form-item>
+              <el-select v-model="selectedStyle" style="width:100%" :key="templates.length">
+                <el-option v-for="t in templates" :key="t.id" :label="t.name" :value="t.id">
+                  <span class="opt-name">{{ t.name }}</span>
+                  <span class="opt-desc">{{ t.description }}</span>
                 </el-option>
               </el-select>
             </el-form-item>
 
+            <!-- Step 3: 背景 & 细节 -->
+            <div class="step"><span class="step-num">3</span> 背景和细节 <span class="label-hint">— 可选</span></div>
             <el-form-item>
-              <el-checkbox v-model="useCustomPrompt">
-                自定义提示词（覆盖模板）
-              </el-checkbox>
+              <el-input v-model="bgColor" placeholder="背景：橙色底、蓝色渐变、透明..." maxlength="100" style="margin-bottom:8px" />
+              <el-input v-model="details" placeholder="细节：白色文字、粗体、圆角..." maxlength="200" />
             </el-form-item>
 
-            <el-form-item v-if="useCustomPrompt" label="自定义提示词">
-              <el-input
-                v-model="customPrompt"
-                type="textarea"
-                :rows="3"
-                placeholder="可用 {concept} 占位符引用上面的概念，如 'a minimalist icon of {concept}'"
-              />
+            <!-- Step 4: 补充 -->
+            <div class="step"><span class="step-num">4</span> 补充指令 <span class="label-hint">— 可选</span></div>
+            <el-form-item>
+              <el-input v-model="extraPrompt" type="textarea" :rows="2" placeholder="还想补充什么？例如：参考 iOS 18 风格..." maxlength="300" />
             </el-form-item>
 
-            <el-divider content-position="left">生成设置</el-divider>
+            <el-divider content-position="left">设置</el-divider>
 
             <el-form-item label="AI 服务商">
-              <el-select
-                v-model="selectedProvider"
-                placeholder="选择服务商"
-                style="width: 100%"
-                :key="providers.length"
-              >
-                <el-option
-                  v-for="p in providers"
-                  :key="p.name"
-                  :label="p.displayName"
-                  :value="p.name"
-                >
+              <el-select v-model="selectedProvider" style="width:100%" :key="providers.length">
+                <el-option v-for="p in providers" :key="p.name" :label="p.displayName" :value="p.name">
                   <span>{{ p.displayName }}</span>
-                  <el-tag
-                    v-if="p.configured"
-                    size="small"
-                    type="success"
-                    class="key-tag"
-                  >
-                    已配置
-                  </el-tag>
+                  <el-tag v-if="p.configured" size="small" type="success" class="key-tag">已配置</el-tag>
                 </el-option>
               </el-select>
             </el-form-item>
 
             <el-form-item label="尺寸">
-              <el-select v-model="selectedSize" style="width: 100%">
-                <el-option
-                  v-for="s in sizeOptions"
-                  :key="s"
-                  :label="s"
-                  :value="s"
-                />
+              <el-select v-model="selectedSize" style="width:100%">
+                <el-option v-for="s in sizeOptions" :key="s" :label="s" :value="s" />
               </el-select>
             </el-form-item>
 
-            <el-form-item>
-              <el-button
-                type="primary"
-                :loading="generating"
-                @click="handleGenerate"
-                size="large"
-                class="generate-btn"
-              >
-                {{ generating ? '生成中...' : '生成图标' }}
-              </el-button>
-            </el-form-item>
+            <el-button type="primary" :loading="generating" @click="handleGenerate" size="large" style="width:100%">
+              {{ generating ? '生成中...' : '生成图标' }}
+            </el-button>
+
           </el-form>
         </el-card>
-      </el-col>
-
-      <!-- 右：预览 -->
-      <el-col :xs="24" :md="12">
-        <el-card>
-          <template #header>
-            <div class="preview-header">
-              <span>预览</span>
-              <el-button
-                v-if="generatedImage"
-                type="primary"
-                text
-                @click="handleSendToEdit"
-              >
-                去编辑导出 →
-              </el-button>
-            </div>
-          </template>
-          <div class="preview-area" v-loading="generating" element-loading-text="AI 正在创作中...">
-            <el-empty v-if="!generatedImage && !generating" description="生成的图标会显示在这里" />
-            <img
-              v-if="generatedImage"
-              :src="toDataUrl(generatedImage)"
-              class="preview-image"
-              alt="生成的图标"
-            />
-          </div>
-        </el-card>
-      </el-col>
-    </el-row>
+      </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.page-title {
-  margin: 0 0 16px;
-  font-size: 22px;
+.gen-root { display: flex; flex-direction: column; height: calc(100vh - 110px); }
+
+.page-title { margin: 0 0 12px; font-size: 18px; flex-shrink: 0; }
+
+.gen-body { flex: 1; display: flex; gap: 16px; min-height: 0; }
+
+/* 画布 */
+.canvas-area {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  border-radius: 6px; min-width: 0;
 }
 
-.option-name {
-  float: left;
+.canvas-inner {
+  width: 100%; min-height: 300px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  border-radius: 6px; padding: 24px; flex: 1;
 }
 
-.option-desc {
-  float: right;
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
+.checkerboard {
+  background-image:
+    linear-gradient(45deg, var(--el-border-color-lighter) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--el-border-color-lighter) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--el-border-color-lighter) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--el-border-color-lighter) 75%);
+  background-size: 20px 20px; background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
+  background-color: var(--el-fill-color-lighter);
 }
 
-.key-tag {
-  margin-left: 8px;
-}
+.preview-img { max-width: 100%; max-height: 450px; object-fit: contain; }
 
-.generate-btn {
-  width: 100%;
-}
+.canvas-actions { margin-top: 12px; }
 
-.preview-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
+/* 工具栏 */
+.side-panel { width: 280px; flex-shrink: 0; overflow-y: auto; }
 
-.preview-area {
-  min-height: 400px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--el-fill-color-lighter);
-  border-radius: 4px;
-  padding: 24px;
-}
+.opt-name { float: left; }
+.opt-desc { float: right; color: var(--el-text-color-secondary); font-size: 12px; }
+.key-tag { margin-left: 8px; }
 
-.preview-image {
-  max-width: 100%;
-  max-height: 500px;
-  object-fit: contain;
-}
+.label-hint { font-weight: normal; font-size: 12px; color: var(--el-text-color-secondary); }
+
+.step { font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+.step-num { display: inline-block; width: 20px; height: 20px; line-height: 20px; text-align: center; background: var(--el-color-primary); color: #fff; border-radius: 50%; font-size: 12px; margin-right: 4px; }
+
+.quick-words { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.quick-tag { cursor: pointer; }
+.quick-tag:hover { filter: brightness(0.9); }
 </style>

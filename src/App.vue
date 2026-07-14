@@ -23,7 +23,10 @@ appWindow.onResized(async () => {
   <div class="app-layout">
     <!-- 标题栏 -->
     <header class="titlebar" data-tauri-drag-region>
-      <span class="titlebar-title">IconForge</span>
+      <div class="titlebar-brand">
+        <img src="/icon.png" class="titlebar-icon" alt="" />
+        <span class="titlebar-title">IconForge</span>
+      </div>
       <div class="titlebar-controls">
         <el-button text class="win-btn" @click="appWindow.minimize()">
           <el-icon><Minus /></el-icon>
@@ -88,10 +91,13 @@ appWindow.onResized(async () => {
   user-select: none;
 }
 
-.titlebar-title {
-  font-size: 13px;
-  font-weight: 600;
+.titlebar-brand {
+  display: flex; align-items: center; gap: 6px;
 }
+
+.titlebar-icon { width: 18px; height: 18px; }
+
+.titlebar-title { font-size: 13px; font-weight: 600; }
 
 .titlebar-controls {
   display: flex;
@@ -115,7 +121,12 @@ appWindow.onResized(async () => {
   flex: 1;
 }
 
+.app-body .el-aside {
+  padding-bottom: 20px;
+}
+
 .app-body .el-menu {
+  height: 100%;
   border-right-width: 1px;
 }
 

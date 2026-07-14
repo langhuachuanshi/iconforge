@@ -44,14 +44,19 @@ pub async fn generate_icon(
     state: State<'_, AppState>,
     req: GenerateRequest,
 ) -> Result<GenerateResponse, AppError> {
-    // 1. 组装 prompt
-    let prompt = if let Some(custom) = &req.custom_prompt {
-        custom.replace("{concept}", &req.concept)
-    } else {
-        let tpl = templates::get_template(&req.style)
-            .ok_or_else(|| AppError::NotFound(format!("风格模板 {} 不存在", req.style)))?;
-        tpl.prompt_prefix.replace("{concept}", &req.concept)
-    };
+    // 1. 组装 prompt：模板 + 步骤填充
+    let tpl = templates::get_template(&req.style)
+        .ok_or_else(|| AppError::NotFound(format!("风格模板 {} 不存在", req.style)))?;
+    let mut prompt = tpl.prompt_prefix.replace("{concept}", &req.concept);
+    // 额外指令追加到末尾（背景、细节、补充等）
+    if let Some(extra) = &req.extra {
+        if !extra.is_empty() {
+            prompt.push_str(". ");
+            prompt.push_str(extra);
+        }
+    }
+    // 统一收尾：图标质量约束
+    prompt.push_str(". Centered composition, professional app icon, readable at small sizes");
 
     // 2. 从 DB 获取服务商配置
     let config = {

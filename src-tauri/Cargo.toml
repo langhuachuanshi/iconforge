@@ -1,9 +1,9 @@
 [package]
 name = "iconforge"
 version = "0.1.0"
-description = "IconForge - AI icon generation desktop app"
-authors = ["you"]
-license = ""
+description = "IconForge - AI 图标生成桌面应用"
+authors = ["silas <silas@890625.com>"]
+license = "MIT"
 repository = ""
 edition = "2021"
 rust-version = "1.77.2"

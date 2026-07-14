@@ -2,12 +2,11 @@
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
-import { convertFileSrc } from '@tauri-apps/api/core'
 import {
   deleteIcon,
   fetchIconBase64,
-  getIconPath,
   listIcons,
+  toDataUrl,
   type IconMeta,
 } from '../api/client'
 import { useWorkspaceStore } from '../stores/workspace'
@@ -28,13 +27,11 @@ async function loadIcons() {
   loading.value = true
   try {
     icons.value = await listIcons()
-    // 批量加载缩略图
     for (const icon of icons.value) {
       try {
-        const path = await getIconPath(icon.id)
-        thumbUrls.value[icon.id] = convertFileSrc(path)
+        const result = await fetchIconBase64(icon.id)
+        thumbUrls.value[icon.id] = toDataUrl(result)
       } catch {
-        // 加载失败，显示占位
         thumbUrls.value[icon.id] = ''
       }
     }
@@ -42,21 +39,6 @@ async function loadIcons() {
     ElMessage.error('加载历史记录失败')
   } finally {
     loading.value = false
-  }
-}
-
-/** 格式化时间显示 */
-function formatTime(iso: string): string {
-  try {
-    const d = new Date(iso)
-    return d.toLocaleString('zh-CN', {
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    })
-  } catch {
-    return iso
   }
 }
 
@@ -132,11 +114,6 @@ async function handleDelete(icon: IconMeta) {
           <div class="info-concept" :title="icon.concept">
             {{ icon.concept || '(未命名)' }}
           </div>
-          <div class="info-meta">
-            <el-tag size="small" type="info">{{ icon.style }}</el-tag>
-            <el-tag size="small">{{ icon.provider }}</el-tag>
-          </div>
-          <div class="info-time">{{ formatTime(icon.created_at) }}</div>
           <div class="info-actions">
             <el-button size="small" type="primary" @click="handleReuse(icon)">
               载入编辑
@@ -202,24 +179,12 @@ async function handleDelete(icon: IconMeta) {
 
 .info-concept {
   font-weight: 600;
-  font-size: 14px;
+  font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  margin-bottom: 8px;
-}
-
-.info-meta {
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-  margin-bottom: 4px;
-}
-
-.info-time {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-  margin-bottom: 12px;
+  margin-bottom: 10px;
+  text-align: center;
 }
 
 .info-actions {

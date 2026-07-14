@@ -82,14 +82,13 @@ function onCanvasWheel(e: WheelEvent) {
 function onCanvasMouseDown(e: MouseEvent) {
   if (e.button !== 0) return
   if (touchupActive.value) return // 触摸画布自己处理
-  if (cropActive.value) { handleCropMouseDown(e); return }
+  // 裁剪模式下直接拖拽平移图片（取景框固定不动）
   isPanning.value = true
   panStart.value = { x: e.clientX, y: e.clientY, px: panX.value, py: panY.value }
 }
 
 function onCanvasMouseMove(e: MouseEvent) {
   if (touchupActive.value) return // 触摸画布自己处理
-  if (cropActive.value) { handleCropMouseMove(e); return }
   if (!isPanning.value) return
   panX.value = panStart.value.px + (e.clientX - panStart.value.x)
   panY.value = panStart.value.py + (e.clientY - panStart.value.y)
@@ -97,98 +96,50 @@ function onCanvasMouseMove(e: MouseEvent) {
 
 function onCanvasMouseUp() {
   isPanning.value = false
-  if (cropActive.value) handleCropMouseUp()
 }
 
-// ── 裁剪（带九宫格） ──
+// ── 裁剪（取景框模式：框固定在画布中央，图片在背后缩放/平移） ──
 const cropActive = ref(false)
-const cropRect = ref({ x: 0, y: 0, w: 100, h: 100 })
-const cropDragging = ref<string | null>(null)
-const cropDragStart = ref({ x: 0, y: 0, rx: 0, ry: 0, rw: 0, rh: 0 })
+const cropSize = ref(0.75) // 裁剪框占画布短边比例 0.3~1.0
+
+// 取景框尺寸（CSS flexbox 自动居中）
+const cropBoxStyle = computed(() => {
+  const rect = canvasRef.value?.getBoundingClientRect()
+  const side = Math.min(rect?.width || 400, rect?.height || 300) * cropSize.value
+  return { width: `${side}px`, height: `${side}px` }
+})
 
 function startCrop() {
   if (!image.value) return
   cropActive.value = true
-  const w = imgNatural.value.w, h = imgNatural.value.h
-  const side = Math.min(w, h)
-  cropRect.value = { x: Math.round((w - side) / 2), y: Math.round((h - side) / 2), w: side, h: side }
 }
 
-function cancelCrop() { cropActive.value = false; fitToCanvas() }
+function cancelCrop() { cropActive.value = false }
 
 async function confirmCrop() {
   if (!image.value) return
-  const r = cropRect.value
+  const rect = canvasRef.value?.getBoundingClientRect()
+  const cw = rect?.width || 400, ch = rect?.height || 300
+  const side = Math.min(cw, ch) * cropSize.value
+  // 取景框屏幕坐标（CSS flexbox 居中）→ 图像坐标
+  const boxScreenX = (cw - side) / 2
+  const boxScreenY = (ch - side) / 2
+  const imgX = Math.round((boxScreenX - panX.value) / scale.value)
+  const imgY = Math.round((boxScreenY - panY.value) / scale.value)
+  const imgSide = Math.round(side / scale.value)
+  // clamp 到图像边界
+  const x = Math.max(0, imgX)
+  const y = Math.max(0, imgY)
+  const w = Math.min(imgSide, imgNatural.value.w - x)
+  const h = Math.min(imgSide, imgNatural.value.h - y)
+
   pushHistory()
-  processing.value = true; cropActive.value = false; fitToCanvas()
+  processing.value = true; cropActive.value = false
   try {
-    syncImage(await cropImage({ image: image.value, x: r.x, y: r.y, width: r.w, height: r.h }))
+    syncImage(await cropImage({ image: image.value, x, y, width: w, height: h }))
     ElMessage.success('裁剪完成')
   } catch (e: any) { ElMessage.error(`裁剪失败：${e?.message || e}`) } finally { processing.value = false }
 }
-
-function handleCropMouseDown(e: MouseEvent) {
-  const pt = canvasToImage(e); if (!pt) return
-  const r = cropRect.value
-  // 手柄命中半径：屏幕像素换算到图像坐标
-  const hs = 12 / scale.value
-  const onL  = Math.abs(pt.x - r.x)     <= hs
-  const onR  = Math.abs(pt.x - r.x - r.w) <= hs
-  const onT  = Math.abs(pt.y - r.y)     <= hs
-  const onB  = Math.abs(pt.y - r.y - r.h) <= hs
-  const inside = pt.x >= r.x + hs && pt.x <= r.x + r.w - hs &&
-                  pt.y >= r.y + hs && pt.y <= r.y + r.h - hs
-
-  if (onT && onL) cropDragging.value = 'nw'
-  else if (onT && onR) cropDragging.value = 'ne'
-  else if (onB && onL) cropDragging.value = 'sw'
-  else if (onB && onR) cropDragging.value = 'se'
-  else if (inside) cropDragging.value = 'move'
-  else return // 点击在裁剪框外，忽略
-
-  cropDragStart.value = { x: e.clientX, y: e.clientY, rx: r.x, ry: r.y, rw: r.w, rh: r.h }
-  e.preventDefault(); e.stopPropagation()
-}
-
-function handleCropMouseMove(e: MouseEvent) {
-  if (!cropDragging.value) return
-  const s = cropDragStart.value
-  // 鼠标在屏幕上的位移 → 图像坐标位移
-  const dx = (e.clientX - s.x) / scale.value
-  const dy = (e.clientY - s.y) / scale.value
-  let rx = s.rx, ry = s.ry, rw = s.rw, rh = s.rh
-  const minSide = 10
-  const maxX = imgNatural.value.w, maxY = imgNatural.value.h
-
-  switch (cropDragging.value) {
-    case 'nw':
-      rx = clamp(s.rx + dx, 0, s.rx + s.rw - minSide)
-      ry = clamp(s.ry + dy, 0, s.ry + s.rh - minSide)
-      rw = s.rx + s.rw - rx; rh = s.ry + s.rh - ry
-      break
-    case 'ne':
-      ry = clamp(s.ry + dy, 0, s.ry + s.rh - minSide)
-      rw = clamp(s.rw + dx, minSide, maxX - s.rx)
-      rh = s.ry + s.rh - ry
-      break
-    case 'sw':
-      rx = clamp(s.rx + dx, 0, s.rx + s.rw - minSide)
-      rh = clamp(s.rh + dy, minSide, maxY - s.ry)
-      rw = s.rx + s.rw - rx
-      break
-    case 'se':
-      rw = clamp(s.rw + dx, minSide, maxX - s.rx)
-      rh = clamp(s.rh + dy, minSide, maxY - s.ry)
-      break
-    case 'move':
-      rx = clamp(s.rx + dx, 0, maxX - s.rw)
-      ry = clamp(s.ry + dy, 0, maxY - s.rh)
-      break
-  }
-  cropRect.value = { x: Math.round(rx), y: Math.round(ry), w: Math.round(rw), h: Math.round(rh) }
-}
-
-function handleCropMouseUp() { cropDragging.value = null }
 
 // ── 手动修补 ──
 const touchupActive = ref(false)
@@ -263,20 +214,12 @@ function syncImage(b64: string) {
   image.value = b64
   workspace.setImage(b64, '')
   const img = new Image()
-  img.onload = () => { imgNatural.value = { w: img.naturalWidth, h: img.naturalHeight } }
+  img.onload = () => {
+    imgNatural.value = { w: img.naturalWidth, h: img.naturalHeight }
+    nextTick(fitToCanvas)
+  }
   img.src = toDataUrl(b64)
 }
-
-function canvasToImage(e: MouseEvent) {
-  const rect = canvasRef.value?.getBoundingClientRect()
-  if (!rect) return null
-  return {
-    x: (e.clientX - rect.left - panX.value) / scale.value,
-    y: (e.clientY - rect.top - panY.value) / scale.value,
-  }
-}
-
-function clamp(v: number, min: number, max: number) { return Math.max(min, Math.min(max, v)) }
 
 // ── 快捷键 ──
 function onKeydown(e: KeyboardEvent) {
@@ -296,9 +239,11 @@ watch(() => workspace.currentImage, (val) => {
   if (val) {
     image.value = val
     const img = new Image()
-    img.onload = () => { imgNatural.value = { w: img.naturalWidth, h: img.naturalHeight } }
+    img.onload = () => {
+      imgNatural.value = { w: img.naturalWidth, h: img.naturalHeight }
+      nextTick(fitToCanvas)
+    }
     img.src = toDataUrl(val)
-    nextTick(fitToCanvas)
   }
 }, { immediate: true })
 
@@ -311,7 +256,6 @@ async function openFile(file: File) {
   syncImage(await blobToBase64(file))
   isDirty.value = false
   undoStack.value = []; redoStack.value = []
-  nextTick(fitToCanvas)
   return false // 阻止 el-upload 默认上传
 }
 
@@ -379,10 +323,6 @@ async function handleExport() {
 
 // ── computed ──
 const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}px) scale(${scale.value})`)
-const cropStyle = computed(() => {
-  const r = cropRect.value, s = scale.value
-  return { left: `${panX.value + r.x * s}px`, top: `${panY.value + r.y * s}px`, width: `${r.w * s}px`, height: `${r.h * s}px` }
-})
 </script>
 
 <template>
@@ -425,7 +365,6 @@ const cropStyle = computed(() => {
       <div
         ref="canvasRef"
         class="canvas"
-        :class="{ 'canvas--crop': cropActive }"
         v-loading="processing"
         @wheel="onCanvasWheel"
         @mousedown="onCanvasMouseDown"
@@ -436,12 +375,12 @@ const cropStyle = computed(() => {
         <div class="canvas-bg checkerboard" />
         <img :src="toDataUrl(image)" class="canvas-img" :style="{ transform: imageTransform }" draggable="false" />
 
-        <!-- 裁剪框（box-shadow 实现外部遮罩） -->
-        <div v-if="cropActive" class="crop-box" :style="cropStyle">
-          <div class="crop-grid-h" v-for="i in 2" :key="'h'+i" :style="{ top: `${(100/3)*i}%` }" />
-          <div class="crop-grid-v" v-for="i in 2" :key="'v'+i" :style="{ left: `${(100/3)*i}%` }" />
-          <div class="crop-handle nw" /><div class="crop-handle ne" />
-          <div class="crop-handle sw" /><div class="crop-handle se" />
+        <!-- 裁剪取景框（固定在画布中央，图片在背后缩放平移） -->
+        <div v-if="cropActive" class="crop-overlay">
+          <div class="crop-viewfinder" :style="cropBoxStyle">
+            <div class="crop-grid-h" v-for="i in 2" :key="'h'+i" :style="{ top: `${(100/3)*i}%` }" />
+            <div class="crop-grid-v" v-for="i in 2" :key="'v'+i" :style="{ left: `${(100/3)*i}%` }" />
+          </div>
         </div>
 
         <!-- 修补画布 -->
@@ -471,9 +410,13 @@ const cropStyle = computed(() => {
             <p class="tool-desc">自由裁剪，九宫格辅助构图</p>
           </template>
           <template v-else-if="cropActive">
+            <div style="margin-bottom:8px">
+              <span class="tool-desc">取景框：{{ Math.round(cropSize * 100) }}%</span>
+              <el-slider v-model="cropSize" :min="0.3" :max="1.0" :step="0.05" size="small" />
+            </div>
             <div class="btn-row"><el-button type="primary" @click="confirmCrop" style="flex:1">确认</el-button>
             <el-button @click="cancelCrop" style="flex:1">取消</el-button></div>
-            <p class="tool-desc">滚轮缩放，拖拽手柄调整选区</p>
+            <p class="tool-desc">滚轮缩放，拖拽移动图片，框内为裁剪结果</p>
           </template>
           <template v-else>
             <div style="margin-bottom:8px">
@@ -553,8 +496,6 @@ const cropStyle = computed(() => {
   cursor: grab; min-width: 0;
 }
 .canvas:active { cursor: grabbing; }
-.canvas--crop, .canvas--crop:active { cursor: crosshair; }
-
 .canvas-bg { position: absolute; inset: 0; }
 .checkerboard {
   background-image:
@@ -568,19 +509,18 @@ const cropStyle = computed(() => {
 
 .canvas-img { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
 
-/* 裁剪 */
-.crop-box {
-  position: absolute; outline: 2px solid var(--el-color-primary); outline-offset: -1px;
-  box-shadow: 0 0 0 9999px rgba(0,0,0,0.55);
-  pointer-events: none;
+/* 裁剪取景框（flexbox 居中，不拦截鼠标事件） */
+.crop-overlay {
+  position: absolute; inset: 0; z-index: 5; pointer-events: none;
+  display: flex; align-items: center; justify-content: center;
+}
+.crop-viewfinder {
+  position: relative;
+  outline: 2px solid var(--el-color-primary); outline-offset: -1px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
 }
 .crop-grid-h { position: absolute; left: 0; right: 0; border-top: 1px dashed rgba(255,255,255,0.6); }
 .crop-grid-v { position: absolute; top: 0; bottom: 0; border-left: 1px dashed rgba(255,255,255,0.6); }
-.crop-handle { position: absolute; width: 12px; height: 12px; background: var(--el-color-white); border: 2px solid var(--el-color-primary); pointer-events: auto; }
-.nw { top: -6px; left: -6px; cursor: nw-resize; }
-.ne { top: -6px; right: -6px; cursor: ne-resize; }
-.sw { bottom: -6px; left: -6px; cursor: sw-resize; }
-.se { bottom: -6px; right: -6px; cursor: se-resize; }
 
 /* 修补画布（覆盖在图片上，接收画笔操作） */
 .touchup-canvas { position: absolute; top: 0; left: 0; pointer-events: auto; cursor: none; }

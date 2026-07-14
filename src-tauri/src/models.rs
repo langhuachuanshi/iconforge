@@ -34,8 +34,9 @@ pub struct GenerateRequest {
     pub size: String,
     /// Provider 名称，如 tongyi/doubao/cogview
     pub provider: String,
-    /// 用户自定义提示词，覆盖模板（可选）
-    pub custom_prompt: Option<String>,
+    /// 额外指令，追加到模板提示词末尾（可选）
+    #[serde(default)]
+    pub extra: Option<String>,
 }
 
 fn default_style() -> String {
@@ -80,7 +81,7 @@ pub struct RemoveBgRequest {
 }
 
 fn default_threshold() -> f64 {
-    0.5
+    0.45
 }
 
 /// 图片响应（裁剪、抠图等操作共用）

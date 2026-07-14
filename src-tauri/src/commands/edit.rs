@@ -36,35 +36,43 @@ pub async fn save_image_file(save_path: String, image: String) -> Result<(), App
 pub async fn import_bg_model(
     state: State<'_, AppState>,
     source_path: String,
+    model_id: Option<String>,
 ) -> Result<(), AppError> {
-    let model_path = {
+    let mid = model_id.unwrap_or_else(|| "rmbg-1.4".into());
+    let m = services::remove_bg::get_model(&mid);
+    let target = {
         let storage = state.storage.lock();
-        services::remove_bg::model_path(storage.base_dir())
+        services::remove_bg::model_path(storage.base_dir(), m.filename)
     };
-    std::fs::copy(&source_path, &model_path)?;
+    std::fs::copy(&source_path, &target)?;
     Ok(())
+}
+
+fn get_model_id(storage: &crate::services::storage::Storage) -> String {
+    let id = storage.get_config("bg_model", "crispcut-quality");
+    if id.is_empty() { "crispcut-quality".into() } else { id }
 }
 
 /// 检查抠图模型是否已下载
 #[tauri::command]
-pub async fn check_bg_model(state: State<'_, AppState>) -> Result<bool, AppError> {
+pub async fn check_bg_model(state: State<'_, AppState>) -> Result<serde_json::Value, AppError> {
     let storage = state.storage.lock();
-    Ok(services::remove_bg::model_exists(storage.base_dir()))
+    let mid = get_model_id(&storage);
+    let has = services::remove_bg::model_exists(storage.base_dir(), &mid);
+    Ok(serde_json::json!({"downloaded": has, "model": mid}))
 }
 
-/// 下载抠图模型（含进度事件），model_url 从 config 读取
+/// 下载抠图模型（含进度事件）
 #[tauri::command]
 pub async fn download_bg_model(
     window: tauri::Window,
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
-    let (model_dir, model_url) = {
+    let (model_dir, mid) = {
         let storage = state.storage.lock();
-        let url = storage.get_config("bg_model_url", "");
-        (storage.base_dir().to_path_buf(), url)
+        (storage.base_dir().to_path_buf(), get_model_id(&storage))
     };
-    let url_opt = if model_url.is_empty() { None } else { Some(model_url.as_str()) };
-    services::remove_bg::download_model(&window, &model_dir, url_opt).await
+    services::remove_bg::download_model(&window, &model_dir, &mid).await
 }
 
 /// 移除背景
@@ -74,14 +82,14 @@ pub async fn remove_background(
     req: RemoveBgRequest,
 ) -> Result<ImageResponse, AppError> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(&req.image)?;
-    let model_dir = {
+    let (model_dir, mid) = {
         let storage = state.storage.lock();
-        storage.base_dir().to_path_buf()
+        (storage.base_dir().to_path_buf(), get_model_id(&storage))
     };
     let threshold = req.threshold.clamp(0.0, 1.0);
 
     let result = tokio::task::spawn_blocking(move || {
-        services::remove_bg::run_inference(&model_dir, &bytes, threshold)
+        services::remove_bg::run_inference(&model_dir, &bytes, threshold, &mid)
     })
     .await
     .map_err(|e| AppError::Image(e.to_string()))??;

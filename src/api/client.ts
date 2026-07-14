@@ -180,7 +180,7 @@ export async function reorderProviders(ids: string[]): Promise<void> {
 
 // ---------- 抠图模型 ----------
 
-export async function checkBgModel(): Promise<boolean> {
+export async function checkBgModel(): Promise<{ downloaded: boolean; model: string }> {
   return invoke('check_bg_model')
 }
 
