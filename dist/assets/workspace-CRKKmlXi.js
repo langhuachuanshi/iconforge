@@ -1,0 +1,1 @@
+import{D as e,o as t}from"./index-CWBSnALC.js";var n=t(`workspace`,()=>{let t=e(``),n=e(``);function r(e,r=``){t.value=e,n.value=r}function i(){t.value=``,n.value=``}return{currentImage:t,currentIconId:n,setImage:r,clear:i}});export{n as t};
