@@ -301,9 +301,7 @@ async function handleRemoveBg() {
   pushHistory()
   processing.value = true
   try {
-    let th = 0.5
-    try { const c = await getConfig(); if (c?.bg_threshold) th = parseFloat(c.bg_threshold) } catch { /* */ }
-    syncImage(await removeBackground(image.value, th))
+    syncImage(await removeBackground(image.value))
     ElMessage.success('智能抠图完成')
   } catch (e: any) { ElMessage.error(`抠图失败：${e?.message || e}`) } finally { processing.value = false }
 }

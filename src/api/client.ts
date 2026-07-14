@@ -65,10 +65,10 @@ export async function cropImage(params: CropParams): Promise<string> {
   return result.image
 }
 
-export async function removeBackground(image: string, threshold?: number): Promise<string> {
+export async function removeBackground(image: string): Promise<string> {
   try {
     const result = await invoke<{ image: string }>('remove_background', {
-      req: { image, threshold: threshold ?? 0.5 }
+      req: { image, threshold: 0.0 }
     })
     return result.image
   } catch (e: any) {
