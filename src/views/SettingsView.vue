@@ -9,25 +9,22 @@ import {
   deleteProvider,
   toggleProvider,
   reorderProviders,
-  checkBgModel,
+  listBgModels,
   downloadBgModel,
+  deleteBgModel,
+  openModelLocation,
   type ProviderEntry,
   type ProviderUpsertRequest,
+  type BgModelEntry,
 } from '../api/client'
 
 const providers = ref<ProviderEntry[]>([])
 const loading = ref(false)
 
 // 抠图设置
-const bgModelId = ref('crispcut-quality')
+const bgModels = ref<BgModelEntry[]>([])
 const bgDownloading = ref('')
 const bgDownPct = ref(0)
-const bgModels = [
-  { id: 'crispcut-quality', name: 'CrispCut（推荐）', size: '约 25MB' },
-  { id: 'crispcut-fast', name: 'CrispCut-快速版', size: '约 6.5MB' },
-  { id: 'rmbg-1.4', name: 'RMBG-1.4', size: '约 40MB' },
-  { id: 'rmbg-2.0', name: 'RMBG-2.0', size: '约 176MB' },
-]
 
 // 编辑对话框
 const dialogVisible = ref(false)
@@ -203,26 +200,52 @@ async function handleToggle(row: ProviderEntry) {
 
 async function loadBgSettings() {
   try {
-    const r = await checkBgModel()
-    bgModelId.value = r.model || 'rmbg-1.4'
-  } catch { /* */ }
+    bgModels.value = await listBgModels()
+  } catch (e: any) {
+    ElMessage.error('加载模型列表失败：' + (e?.message || e))
+  }
+}
+
+async function refreshBgModels() {
+  bgModels.value = await listBgModels()
 }
 
 async function selectModel(id: string) {
-  bgModelId.value = id
-  const { invoke } = await import('@tauri-apps/api/core')
-  await invoke('set_config', { key: 'bg_model', value: id })
-  ElMessage.success(`已切换为 ${bgModels.find(m => m.id === id)?.name}`)
-}
-
-async function downloadModel(id: string) {
-  bgDownloading.value = id; bgDownPct.value = 0
+  const m = bgModels.value.find(x => x.id === id)
+  if (!m) return
+  if (!m.downloaded) {
+    // 未下载：询问是否下载
+    try {
+      await ElMessageBox.confirm(
+        `「${m.name}」尚未下载，是否现在下载？（${m.size}）`,
+        '模型未下载',
+        { confirmButtonText: '下载', cancelButtonText: '取消', type: 'info' }
+      )
+    } catch { return }
+    await downloadModel(id)
+    return
+  }
   try {
     const { invoke } = await import('@tauri-apps/api/core')
     await invoke('set_config', { key: 'bg_model', value: id })
+    await refreshBgModels()
+    ElMessage.success(`已切换为 ${m.name}`)
+  } catch (e: any) {
+    ElMessage.error('切换失败：' + (e?.message || e))
+  }
+}
+
+async function downloadModel(id: string) {
+  const m = bgModels.value.find(x => x.id === id)
+  if (!m) return
+  bgDownloading.value = id; bgDownPct.value = 0
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    // 下载即选用：同步当前模型
+    await invoke('set_config', { key: 'bg_model', value: id })
     await downloadBgModel((pct: number) => { bgDownPct.value = Math.round(pct) })
-    bgModelId.value = id
-    ElMessage.success('下载完成，已自动启用')
+    await refreshBgModels()
+    ElMessage.success(`「${m.name}」下载完成，已自动启用`)
   } catch (e: any) { ElMessage.error('下载失败：' + (e?.message || e)) }
   finally { bgDownloading.value = '' }
 }
@@ -234,9 +257,37 @@ async function importModel(id: string) {
     const selected = await open({ filters: [{ name: 'ONNX 模型', extensions: ['onnx'] }], multiple: false })
     if (!selected) return
     await invoke('import_bg_model', { sourcePath: selected as string, modelId: id })
-    bgModelId.value = id
+    await invoke('set_config', { key: 'bg_model', value: id })
+    await refreshBgModels()
     ElMessage.success('模型已导入，已自动启用')
   } catch (e: any) { ElMessage.error('导入失败：' + (e?.message || e)) }
+}
+
+async function deleteModel(id: string) {
+  const m = bgModels.value.find(x => x.id === id)
+  if (!m) return
+  try {
+    await ElMessageBox.confirm(
+      `确定删除已下载的「${m.name}」模型文件吗？此操作不可恢复。`,
+      '删除确认',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+  } catch { return }
+  try {
+    await deleteBgModel(id)
+    await refreshBgModels()
+    ElMessage.success('已删除模型文件')
+  } catch (e: any) {
+    ElMessage.error('删除失败：' + (e?.message || e))
+  }
+}
+
+async function openLocation(id: string) {
+  try {
+    await openModelLocation(id)
+  } catch (e: any) {
+    ElMessage.error('打开失败：' + (e?.message || e))
+  }
 }
 </script>
 
@@ -277,22 +328,52 @@ async function importModel(id: string) {
 
       <el-tab-pane label="抠图" lazy>
         <div class="bg-model-list">
-          <el-card v-for="m in bgModels" :key="m.id" shadow="hover" class="bg-model-card" :class="{ selected: bgModelId === m.id }">
+          <el-card v-for="m in bgModels" :key="m.id" shadow="hover" class="bg-model-card" :class="{ selected: m.current }">
             <div class="bg-card-body">
               <div class="bg-card-row">
                 <span class="bg-card-name">{{ m.name }}</span>
-                <el-tag v-if="bgModelId === m.id" type="success" size="small">使用中</el-tag>
-                <el-tag v-else type="info" size="small">待切换</el-tag>
+                <el-tag v-if="m.current" type="success" size="small">使用中</el-tag>
+                <el-tag v-else-if="m.downloaded" type="info" size="small">已下载</el-tag>
+                <el-tag v-else type="warning" size="small" effect="plain">未下载</el-tag>
               </div>
-              <div class="bg-card-row">大小：{{ m.size }}</div>
+              <div class="bg-card-row bg-meta-row">大小：{{ m.size }}</div>
               <el-progress v-if="bgDownloading === m.id" :percentage="bgDownPct" :stroke-width="6" style="margin: 8px 0" />
             </div>
             <div class="bg-card-actions">
-              <el-button size="small" @click="downloadModel(m.id)" :loading="bgDownloading === m.id">
-                下载
-              </el-button>
-              <el-button size="small" @click="importModel(m.id)">导入</el-button>
-              <el-button v-if="bgModelId !== m.id" size="small" text type="primary" @click="selectModel(m.id)">选用</el-button>
+              <!-- 未下载：主操作下载 -->
+              <template v-if="!m.downloaded">
+                <el-button size="small" type="primary" :loading="bgDownloading === m.id" @click="downloadModel(m.id)">
+                  <el-icon><Download /></el-icon>&nbsp;下载
+                </el-button>
+                <el-button class="is-icon" size="small" @click="importModel(m.id)" title="导入本地 ONNX">
+                  <el-icon><Upload /></el-icon>
+                </el-button>
+              </template>
+              <!-- 已下载但非当前：主操作选用 -->
+              <template v-else-if="!m.current">
+                <el-button size="small" type="primary" @click="selectModel(m.id)">
+                  <el-icon><Check /></el-icon>&nbsp;选用
+                </el-button>
+                <el-button class="is-icon" size="small" @click="importModel(m.id)" title="重新导入">
+                  <el-icon><Upload /></el-icon>
+                </el-button>
+                <el-button class="is-icon" size="small" @click="openLocation(m.id)" title="打开文件位置">
+                  <el-icon><FolderOpened /></el-icon>
+                </el-button>
+                <el-button class="is-icon" size="small" type="danger" @click="deleteModel(m.id)" title="删除模型">
+                  <el-icon><Delete /></el-icon>
+                </el-button>
+              </template>
+              <!-- 当前使用 -->
+              <template v-else>
+                <el-button size="small" type="success" disabled>当前使用</el-button>
+                <el-button class="is-icon" size="small" @click="openLocation(m.id)" title="打开文件位置">
+                  <el-icon><FolderOpened /></el-icon>
+                </el-button>
+                <el-button class="is-icon" size="small" type="danger" @click="deleteModel(m.id)" title="删除模型">
+                  <el-icon><Delete /></el-icon>
+                </el-button>
+              </template>
             </div>
           </el-card>
         </div>
@@ -402,11 +483,23 @@ async function importModel(id: string) {
   color: var(--el-text-color-secondary);
 }
 
-.bg-model-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.bg-model-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
 .bg-model-card { flex: 1; min-width: 0; }
 .bg-model-card.selected { border-color: var(--el-color-primary); }
 .bg-card-body { margin-bottom: 12px; }
 .bg-card-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 14px; }
 .bg-card-name { font-weight: 600; }
-.bg-card-actions { display: flex; gap: 4px; }
+.bg-meta-row { color: var(--el-text-color-secondary); font-size: 12px; }
+.bg-card-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.bg-card-actions .el-button + .el-button { margin-left: 0; }
+/* 图标按钮：统一正方形，和文字按钮等高 */
+.bg-card-actions .is-icon {
+  width: 32px;
+  padding: 0;
+  flex-shrink: 0;
+}
 </style>

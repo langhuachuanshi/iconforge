@@ -5,11 +5,12 @@ import {
   cropImage,
   exportIcon,
   removeBackground,
-  checkBgModel,
   downloadBgModel,
+  listBgModels,
   getConfig,
   toDataUrl,
   blobToBase64,
+  type BgModelEntry,
 } from '../api/client'
 import { useWorkspaceStore } from '../stores/workspace'
 
@@ -19,6 +20,12 @@ const processing = ref(false)
 const downloading = ref(false)
 const downloadPct = ref(0)
 const isDirty = ref(false)
+
+// ── 抠图模型 ──
+const bgModels = ref<BgModelEntry[]>([])
+const currentBgModelId = ref('')
+
+const downloadedBgModels = computed(() => bgModels.value.filter(m => m.downloaded))
 
 // ── 画布 ──
 const canvasRef = ref<HTMLElement>()
@@ -234,6 +241,30 @@ function onKeydown(e: KeyboardEvent) {
 onMounted(() => document.addEventListener('keydown', onKeydown))
 onUnmounted(() => document.removeEventListener('keydown', onKeydown))
 
+// ── 加载抠图模型列表 ──
+async function loadBgModels() {
+  try {
+    bgModels.value = await listBgModels()
+    const cur = bgModels.value.find(m => m.current)
+    currentBgModelId.value = cur?.id ?? ''
+  } catch { /* 静默 */ }
+}
+
+async function onBgModelChange(id: string) {
+  // 切换当前模型到后端配置
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('set_config', { key: 'bg_model', value: id })
+    const m = bgModels.value.find(x => x.id === id)
+    bgModels.value.forEach(x => x.current = x.id === id)
+    ElMessage.success(`已切换为 ${m?.name ?? id}`)
+  } catch (e: any) {
+    ElMessage.error('切换失败：' + (e?.message || e))
+  }
+}
+
+onMounted(loadBgModels)
+
 // ── 初始化 ──
 watch(() => workspace.currentImage, (val) => {
   if (val) {
@@ -288,15 +319,25 @@ async function handleClose() {
 // ── 智能抠图 ──
 async function handleRemoveBg() {
   if (!image.value) return
-  try {
-    if (!await checkBgModel()) {
-      try { await ElMessageBox.confirm('首次使用需下载抠图模型，是否下载？', '下载模型', { confirmButtonText: '下载', cancelButtonText: '取消', type: 'info' }) }
-      catch { return }
-      downloading.value = true; downloadPct.value = 0
-      try { await downloadBgModel(pct => { downloadPct.value = Math.round(pct) }); ElMessage.success('下载完成') }
-      catch (e: any) { ElMessage.error(`下载失败：${e?.message || e}`); return } finally { downloading.value = false }
-    }
-  } catch (e: any) { ElMessage.error(`检查失败：${e?.message || e}`); return }
+  // 当前模型没下载：提示是否下载
+  const cur = bgModels.value.find(m => m.id === currentBgModelId.value)
+  const downloaded = cur?.downloaded ?? false
+  if (!downloaded) {
+    try {
+      await ElMessageBox.confirm(
+        cur ? `当前模型「${cur.name}」未下载，是否下载？（${cur.size}）` : '当前模型未下载，是否下载？',
+        '下载模型',
+        { confirmButtonText: '下载', cancelButtonText: '取消', type: 'info' }
+      )
+    } catch { return }
+    downloading.value = true; downloadPct.value = 0
+    try {
+      await downloadBgModel(pct => { downloadPct.value = Math.round(pct) })
+      await loadBgModels()
+      ElMessage.success('下载完成')
+    } catch (e: any) { ElMessage.error(`下载失败：${e?.message || e}`); return }
+    finally { downloading.value = false }
+  }
 
   pushHistory()
   processing.value = true
@@ -432,7 +473,27 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
           </template>
           <el-divider v-if="!cropActive && !touchupActive" />
           <template v-if="!cropActive && !touchupActive">
-            <el-button :disabled="processing || downloading" @click="handleRemoveBg" style="width:100%">
+            <div class="bg-model-picker">
+              <span class="tool-desc">抠图模型</span>
+              <el-select
+                :model-value="currentBgModelId"
+                size="small"
+                style="width:100%; margin-top:4px"
+                placeholder="无可用模型"
+                @change="onBgModelChange"
+              >
+                <el-option
+                  v-for="m in downloadedBgModels"
+                  :key="m.id"
+                  :value="m.id"
+                  :label="m.name"
+                />
+              </el-select>
+              <p v-if="!downloadedBgModels.length" class="tool-desc" style="color: var(--el-color-warning)">
+                尚未下载任何模型，点击下方按钮下载
+              </p>
+            </div>
+            <el-button :disabled="processing || downloading || !downloadedBgModels.length" @click="handleRemoveBg" style="width:100%; margin-top:8px">
               <el-icon><MagicStick /></el-icon> 智能抠图
             </el-button>
             <el-progress v-if="downloading" :percentage="downloadPct" :stroke-width="6" style="margin-top:8px" />
