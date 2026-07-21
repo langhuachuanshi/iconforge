@@ -1,6 +1,28 @@
 import { invoke } from '@tauri-apps/api/core'
 import { save } from '@tauri-apps/plugin-dialog'
 
+// ---------- 内部 helper ----------
+
+/**
+ * 「弹保存对话框 → 调后端命令写文件」的统一流程。
+ * 返回 true 表示已写入，false 表示用户取消。
+ */
+async function saveAndInvoke(
+  cmd: string,
+  defaultName: string,
+  filterName: string,
+  extensions: string[],
+  buildArgs: (savePath: string) => Record<string, unknown>,
+): Promise<boolean> {
+  const filePath = await save({
+    defaultPath: defaultName,
+    filters: [{ name: filterName, extensions }],
+  })
+  if (!filePath) return false // 用户取消
+  await invoke(cmd, buildArgs(filePath))
+  return true
+}
+
 // ---------- 类型 ----------
 
 export interface ProviderInfo {
@@ -84,20 +106,20 @@ export async function exportIcon(
   pngSizes?: number[],
   icoSizes?: number[]
 ): Promise<void> {
-  const filePath = await save({
-    defaultPath: 'icon-export.zip',
-    filters: [{ name: 'ZIP 压缩包', extensions: ['zip'] }],
-  })
-  if (!filePath) return // 用户取消
-
-  await invoke('export_icon_to_file', {
-    req: {
-      image,
-      pngSizes: pngSizes ?? null,
-      icoSizes: icoSizes ?? null,
-    },
-    savePath: filePath,
-  })
+  await saveAndInvoke(
+    'export_icon_to_file',
+    'icon-export.zip',
+    'ZIP 压缩包',
+    ['zip'],
+    (savePath) => ({
+      req: {
+        image,
+        pngSizes: pngSizes ?? null,
+        icoSizes: icoSizes ?? null,
+      },
+      savePath,
+    }),
+  )
 }
 
 export async function listIcons(): Promise<IconMeta[]> {
@@ -250,36 +272,37 @@ export async function extractIcons(filePath: string): Promise<ExtractedIcon[]> {
 
 /** 保存单个 ICO 到磁盘（复用后端 save_image_file，它就是写字节） */
 export async function saveIco(icoBase64: string, defaultName = 'icon.ico'): Promise<void> {
-  const filePath = await save({
-    defaultPath: defaultName,
-    filters: [{ name: 'ICO 图标', extensions: ['ico'] }],
-  })
-  if (!filePath) return
-  const { invoke } = await import('@tauri-apps/api/core')
-  await invoke('save_image_file', { savePath: filePath, image: icoBase64 })
+  await saveAndInvoke(
+    'save_image_file',
+    defaultName,
+    'ICO 图标',
+    ['ico'],
+    (savePath) => ({ savePath, image: icoBase64 }),
+  )
 }
 
-/** 保存单个 PNG 到磁盘 */
-export async function savePng(pngBase64: string, defaultName = 'icon.png'): Promise<void> {
-  const filePath = await save({
-    defaultPath: defaultName,
-    filters: [{ name: 'PNG 图片', extensions: ['png'] }],
-  })
-  if (!filePath) return
-  const { invoke } = await import('@tauri-apps/api/core')
-  await invoke('save_image_file', { savePath: filePath, image: pngBase64 })
+/** 保存单个 PNG 到磁盘，返回是否实际写入（false = 用户取消） */
+export async function savePng(pngBase64: string, defaultName = 'icon.png'): Promise<boolean> {
+  return saveAndInvoke(
+    'save_image_file',
+    defaultName,
+    'PNG 图片',
+    ['png'],
+    (savePath) => ({ savePath, image: pngBase64 }),
+  )
 }
 
 // ---------- 多图转 ICO ----------
 
 /** 多张图片转单个 ICO 并保存 */
 export async function convertImagesToIco(images: string[], sizes: number[]): Promise<void> {
-  const filePath = await save({
-    defaultPath: 'icons.ico',
-    filters: [{ name: 'ICO 图标', extensions: ['ico'] }],
-  })
-  if (!filePath) return // 用户取消
-  await invoke('convert_images_to_ico', { req: { images, sizes }, savePath: filePath })
+  await saveAndInvoke(
+    'convert_images_to_ico',
+    'icons.ico',
+    'ICO 图标',
+    ['ico'],
+    (savePath) => ({ req: { images, sizes }, savePath }),
+  )
 }
 
 // ---------- 工具函数 ----------

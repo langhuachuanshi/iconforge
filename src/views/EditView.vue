@@ -8,6 +8,7 @@ import {
   downloadBgModel,
   listBgModels,
   getConfig,
+  savePng,
   toDataUrl,
   blobToBase64,
   type BgModelEntry,
@@ -292,16 +293,14 @@ async function openFile(file: File) {
 
 async function handleSave() {
   if (!image.value) return
-  const { save } = await import('@tauri-apps/plugin-dialog')
-  const { invoke } = await import('@tauri-apps/api/core')
-  const path = await save({
-    defaultPath: 'icon.png',
-    filters: [{ name: 'PNG 图片', extensions: ['png'] }],
-  })
-  if (!path) return
-  await invoke('save_image_file', { savePath: path, image: image.value })
-  isDirty.value = false
-  ElMessage.success('已保存')
+  try {
+    const saved = await savePng(image.value, 'icon.png')
+    if (!saved) return // 用户取消
+    isDirty.value = false
+    ElMessage.success('已保存')
+  } catch (e: any) {
+    ElMessage.error('保存失败：' + (e?.message || e))
+  }
 }
 
 async function handleClose() {
