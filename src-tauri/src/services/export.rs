@@ -53,6 +53,15 @@ pub fn export_ico(image_bytes: &[u8], sizes: &[u32]) -> Result<ExportFile, AppEr
         entries.push((size, png_bytes));
     }
 
+    let buf = assemble_ico(entries);
+    Ok(ExportFile {
+        filename: "icon.ico".into(),
+        content: buf,
+    })
+}
+
+/// 把 (尺寸, PNG bytes) 列表拼装成 ICO 文件字节
+pub fn assemble_ico(entries: Vec<(u32, Vec<u8>)>) -> Vec<u8> {
     // 手动构造 ICO 文件
     // ICO 头：2 字节保留(0) + 2 字节类型(1=ICO) + 2 字节图像数量
     let num_images = entries.len() as u16;
@@ -65,7 +74,7 @@ pub fn export_ico(image_bytes: &[u8], sizes: &[u32]) -> Result<ExportFile, AppEr
         let mut dir = Vec::with_capacity(16);
         let actual_size = size.min(256) as u8; // ICO 目录存 0=256
         dir.push(actual_size);            // 宽度 (0 = 256)
-        dir.push(actual_size);            // 高度 (0 = 256)
+        dir.push(actual_size);            // 高度
         dir.push(0);                       // 调色板颜色数
         dir.push(0);                       // 保留
         dir.extend_from_slice(&1u16.to_le_bytes());   // 色彩平面数（ICO 中始终为 1）
@@ -90,11 +99,7 @@ pub fn export_ico(image_bytes: &[u8], sizes: &[u32]) -> Result<ExportFile, AppEr
     for (_size, png_data) in &entries {
         buf.extend_from_slice(png_data);
     }
-
-    Ok(ExportFile {
-        filename: "icon.ico".into(),
-        content: buf,
-    })
+    buf
 }
 
 /// 将所有导出文件打包为 ZIP

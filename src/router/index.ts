@@ -27,6 +27,18 @@ const router = createRouter({
       meta: { title: '历史记录' },
     },
     {
+      path: '/extract',
+      name: 'extract',
+      component: () => import('../views/ExtractView.vue'),
+      meta: { title: '图标提取' },
+    },
+    {
+      path: '/image2ico',
+      name: 'image2ico',
+      component: () => import('../views/Image2IcoView.vue'),
+      meta: { title: '图片转 ICO' },
+    },
+    {
       path: '/settings',
       name: 'settings',
       component: () => import('../views/SettingsView.vue'),

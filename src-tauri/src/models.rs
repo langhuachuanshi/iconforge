@@ -146,6 +146,20 @@ pub struct BgDownloadProgress {
     pub total: u64,
 }
 
+/// 抠图模型清单条目
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BgModelEntry {
+    pub id: String,
+    pub name: String,
+    pub size: String,
+    pub downloaded: bool,
+    /// 已下载时的完整文件路径，未下载为 None
+    pub path: Option<String>,
+    /// 是否为当前选中模型
+    pub current: bool,
+}
+
 /// 新增/更新服务商请求
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -173,4 +187,43 @@ pub struct IconListResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ConfigStatusResponse {
     pub providers: Vec<ProviderInfo>,
+}
+
+// ── 图标提取（PE → ICO）──
+
+/// 图标提取请求：传入 PE 文件绝对路径
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractIconsRequest {
+    pub file_path: String,
+}
+
+/// 提取出的单个图标（每个尺寸一条记录）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractedIcon {
+    /// 所属图标组名（如 "MAINICON"）——同组的条目共享此名
+    pub name: String,
+    /// 宽（0 表示 256）
+    pub width: u32,
+    /// 高
+    pub height: u32,
+    /// 位深
+    pub bit_depth: u32,
+    /// 该尺寸的 PNG base64（前端用 <img> 直接显示）
+    pub png_base64: String,
+    /// 整组的 ICO base64（同组共享，用于「导出整组为 ICO」）
+    pub ico_base64: String,
+}
+
+// ── 多图转 ICO ──
+
+/// 图片转 ICO 请求
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConvertIcoRequest {
+    /// base64 编码的原图数组
+    pub images: Vec<String>,
+    /// 目标 ICO 尺寸列表
+    pub sizes: Vec<u32>,
 }

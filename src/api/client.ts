@@ -180,8 +180,34 @@ export async function reorderProviders(ids: string[]): Promise<void> {
 
 // ---------- 抠图模型 ----------
 
+export interface BgModelEntry {
+  id: string
+  name: string
+  size: string
+  downloaded: boolean
+  /** 已下载时的完整文件路径，未下载为 null */
+  path: string | null
+  /** 是否为当前选中模型 */
+  current: boolean
+}
+
 export async function checkBgModel(): Promise<{ downloaded: boolean; model: string }> {
   return invoke('check_bg_model')
+}
+
+/** 列出所有抠图模型及其下载状态 */
+export async function listBgModels(): Promise<BgModelEntry[]> {
+  return invoke('list_bg_models')
+}
+
+/** 删除已下载的模型文件 */
+export async function deleteBgModel(modelId: string): Promise<void> {
+  await invoke('delete_bg_model', { modelId })
+}
+
+/** 在系统资源管理器中打开模型所在位置 */
+export async function openModelLocation(modelId: string): Promise<void> {
+  await invoke('open_model_location', { modelId })
 }
 
 export async function downloadBgModel(
@@ -201,6 +227,59 @@ export async function downloadBgModel(
   } finally {
     unlisten()
   }
+}
+
+// ---------- 图标提取（PE → ICO）----------
+
+export interface ExtractedIcon {
+  /** 所属图标组名（如 MAINICON），同组的条目共享 */
+  name: string
+  width: number
+  height: number
+  bitDepth: number
+  /** 该尺寸的 PNG base64（前端用 <img> 直接显示） */
+  pngBase64: string
+  /** 整组的 ICO base64（同组共享，用于「导出整组为 ICO」） */
+  icoBase64: string
+}
+
+/** 从 PE 文件提取所有图标 */
+export async function extractIcons(filePath: string): Promise<ExtractedIcon[]> {
+  return invoke('extract_icons', { req: { filePath } })
+}
+
+/** 保存单个 ICO 到磁盘（复用后端 save_image_file，它就是写字节） */
+export async function saveIco(icoBase64: string, defaultName = 'icon.ico'): Promise<void> {
+  const filePath = await save({
+    defaultPath: defaultName,
+    filters: [{ name: 'ICO 图标', extensions: ['ico'] }],
+  })
+  if (!filePath) return
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('save_image_file', { savePath: filePath, image: icoBase64 })
+}
+
+/** 保存单个 PNG 到磁盘 */
+export async function savePng(pngBase64: string, defaultName = 'icon.png'): Promise<void> {
+  const filePath = await save({
+    defaultPath: defaultName,
+    filters: [{ name: 'PNG 图片', extensions: ['png'] }],
+  })
+  if (!filePath) return
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('save_image_file', { savePath: filePath, image: pngBase64 })
+}
+
+// ---------- 多图转 ICO ----------
+
+/** 多张图片转单个 ICO 并保存 */
+export async function convertImagesToIco(images: string[], sizes: number[]): Promise<void> {
+  const filePath = await save({
+    defaultPath: 'icons.ico',
+    filters: [{ name: 'ICO 图标', extensions: ['ico'] }],
+  })
+  if (!filePath) return // 用户取消
+  await invoke('convert_images_to_ico', { req: { images, sizes }, savePath: filePath })
 }
 
 // ---------- 工具函数 ----------

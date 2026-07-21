@@ -36,3 +36,4 @@ async-trait = "0.1"
 parking_lot = "0.12"
 ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
 futures-util = "0.3"
+pelite = "0.10"

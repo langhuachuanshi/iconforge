@@ -55,6 +55,14 @@ appWindow.onResized(async () => {
             <el-icon><Crop /></el-icon>
             <span>编辑导出</span>
           </el-menu-item>
+          <el-menu-item index="/extract">
+            <el-icon><CopyDocument /></el-icon>
+            <span>图标提取</span>
+          </el-menu-item>
+          <el-menu-item index="/image2ico">
+            <el-icon><Files /></el-icon>
+            <span>图片转 ICO</span>
+          </el-menu-item>
           <el-menu-item index="/history">
             <el-icon><Clock /></el-icon>
             <span>历史记录</span>

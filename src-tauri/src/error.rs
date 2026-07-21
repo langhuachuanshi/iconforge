@@ -26,6 +26,9 @@ pub enum AppError {
 
     #[error("序列化错误: {0}")]
     Serde(String),
+
+    #[error("PE 解析错误: {0}")]
+    Pe(#[from] pelite::Error),
 }
 
 impl From<serde_json::Error> for AppError {

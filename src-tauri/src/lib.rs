@@ -45,6 +45,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::edit::crop_image,
             commands::edit::check_bg_model,
+            commands::edit::list_bg_models,
+            commands::edit::delete_bg_model,
+            commands::edit::open_model_location,
             commands::edit::download_bg_model,
             commands::edit::import_bg_model,
             commands::edit::save_image_file,
@@ -65,6 +68,8 @@ pub fn run() {
             commands::history::get_icon_base64,
             commands::history::get_icon_path,
             commands::history::delete_icon,
+            commands::extract::extract_icons,
+            commands::convert::convert_images_to_ico,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
