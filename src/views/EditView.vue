@@ -256,6 +256,7 @@ async function onBgModelChange(id: string) {
   try {
     const { invoke } = await import('@tauri-apps/api/core')
     await invoke('set_config', { key: 'bg_model', value: id })
+    currentBgModelId.value = id
     const m = bgModels.value.find(x => x.id === id)
     bgModels.value.forEach(x => x.current = x.id === id)
     ElMessage.success(`已切换为 ${m?.name ?? id}`)
