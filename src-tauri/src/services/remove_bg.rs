@@ -8,6 +8,17 @@ use tokio::io::AsyncWriteExt;
 use crate::error::AppError;
 use crate::models::BgDownloadProgress;
 
+/// 归一化策略（严格对应各模型官方预处理）
+#[derive(Clone, Copy, Debug)]
+pub enum Norm {
+    /// ImageNet: (x/255 - mean) / std，RMBG 用
+    ImageNet,
+    /// 仅 /255 → [0,1]，CrispCut 用
+    UnitOnly,
+    /// x/255 - 0.5 → [-0.5, 0.5]，ISNet 用
+    Centered,
+}
+
 /// 可用模型定义
 pub struct BgModel {
     pub id: &'static str,
@@ -15,6 +26,12 @@ pub struct BgModel {
     pub url: &'static str,
     pub filename: &'static str,
     pub size: &'static str,
+    /// 归一化策略
+    pub norm: Norm,
+    /// true=模型输出已 sigmoid（RMBG/ISNet）；false=输出是 logits，需手动 sigmoid（CrispCut）
+    pub sigmoid_output: bool,
+    /// ONNX 输入张量名（找不到时回退到首个输入）
+    pub input_name: &'static str,
 }
 
 pub const BG_MODELS: &[BgModel] = &[
@@ -24,6 +41,9 @@ pub const BG_MODELS: &[BgModel] = &[
         url: "https://hf-mirror.com/bowespublishing/crisp-cut/resolve/main/onnx/crispcut-quality.onnx",
         filename: "crispcut-quality.onnx",
         size: "约 25MB",
+        norm: Norm::UnitOnly,
+        sigmoid_output: false,
+        input_name: "input",
     },
     BgModel {
         id: "crispcut-fast",
@@ -31,6 +51,9 @@ pub const BG_MODELS: &[BgModel] = &[
         url: "https://hf-mirror.com/bowespublishing/crisp-cut/resolve/main/onnx/crispcut-fast.onnx",
         filename: "crispcut-fast.onnx",
         size: "约 6.5MB",
+        norm: Norm::UnitOnly,
+        sigmoid_output: false,
+        input_name: "input",
     },
     BgModel {
         id: "rmbg-1.4",
@@ -38,6 +61,9 @@ pub const BG_MODELS: &[BgModel] = &[
         url: "https://modelscope.cn/models/briaai/RMBG-1.4/resolve/master/onnx/model.onnx",
         filename: "rmbg-1.4.onnx",
         size: "约 40MB",
+        norm: Norm::ImageNet,
+        sigmoid_output: true,
+        input_name: "input",
     },
     BgModel {
         id: "rmbg-2.0",
@@ -45,6 +71,19 @@ pub const BG_MODELS: &[BgModel] = &[
         url: "https://modelscope.cn/models/briaai/RMBG-2.0/resolve/master/onnx/model.onnx",
         filename: "rmbg-2.0.onnx",
         size: "约 176MB",
+        norm: Norm::ImageNet,
+        sigmoid_output: true,
+        input_name: "input",
+    },
+    BgModel {
+        id: "isnet-general-use",
+        name: "ISNet (ModelScope)",
+        url: "https://hf-mirror.com/x-Liola-x/isnet-general-use-onnx/resolve/main/isnet-general-use.onnx",
+        filename: "isnet-general-use.onnx",
+        size: "约 176MB",
+        norm: Norm::Centered,
+        sigmoid_output: true,
+        input_name: "input",
     },
 ];
 
@@ -122,35 +161,25 @@ pub fn run_inference(model_dir: &Path, image_bytes: &[u8], threshold: f64, model
     let img = image::load_from_memory(image_bytes)?;
     let (orig_w, orig_h) = (img.width(), img.height());
 
-    // 转换为 RGB 并缩放到 1024x1024
+    // 转换为 RGB 并缩放到 1024x1024（各模型官方预处理都是直接拉伸到 1024²）
     let rgb = img.to_rgb8();
     let resized = image::imageops::resize(
         &rgb, 1024, 1024,
         image::imageops::FilterType::Lanczos3,
     );
 
-    // 预处理：官方 ImageNet 归一化 RGB (0,1,2)
-    let mean = [0.485f32, 0.456, 0.406];
-    let std = [0.229f32, 0.224, 0.225];
-    let mut input_data = Vec::with_capacity(3 * 1024 * 1024);
-    for c in 0..3 {
-        for y in 0..1024 {
-            for x in 0..1024 {
-                let v = resized.get_pixel(x, y)[c] as f32 / 255.0;
-                input_data.push((v - mean[c as usize]) / std[c as usize]);
-            }
-        }
-    }
+    // 按模型官方预处理策略归一化
+    let input_data = preprocess(&resized, m.norm);
 
-    // ONNX Runtime 推理
-    let mask = run_ort_inference(&model_path, &input_data, 1024, 1024, threshold, model_id)?;
+    // ONNX Runtime 推理（传入模型配置：输入名、是否需手动 sigmoid）
+    let mask = run_ort_inference(&model_path, &input_data, 1024, 1024, m)?;
 
-    // mask 缩放回原始尺寸
+    // mask 缩放回原始尺寸（用 Bilinear，避免 Lanczos 在 mask 上产生振铃半透明边）
     let mask_img = image::GrayImage::from_raw(1024, 1024, mask)
         .ok_or_else(|| AppError::Image("mask 构造失败".into()))?;
     let mask_resized = image::imageops::resize(
         &mask_img, orig_w, orig_h,
-        image::imageops::FilterType::Lanczos3,
+        image::imageops::FilterType::Triangle,  // Triangle = bilinear kernel
     );
 
     // 合成 RGBA
@@ -171,13 +200,33 @@ pub fn run_inference(model_dir: &Path, image_bytes: &[u8], threshold: f64, model
     Ok(buf)
 }
 
+/// 按模型官方预处理策略归一化 RGB 图（输出 NCHW [1,3,1024,1024] 的扁平数据）
+fn preprocess(resized: &image::RgbImage, norm: Norm) -> Vec<f32> {
+    let mean = [0.485f32, 0.456, 0.406];
+    let std = [0.229f32, 0.224, 0.225];
+    let mut out = Vec::with_capacity(3 * 1024 * 1024);
+    for c in 0..3u8 {
+        for y in 0..1024 {
+            for x in 0..1024 {
+                let v = resized.get_pixel(x, y)[c as usize] as f32 / 255.0;
+                let n = match norm {
+                    Norm::ImageNet => (v - mean[c as usize]) / std[c as usize],
+                    Norm::UnitOnly => v,
+                    Norm::Centered => v - 0.5,
+                };
+                out.push(n);
+            }
+        }
+    }
+    out
+}
+
 fn run_ort_inference(
     model_path: &Path,
     input_data: &[f32],
     w: u32,
     h: u32,
-    threshold: f64,
-    model_id: &str,
+    m: &BgModel,
 ) -> Result<Vec<u8>, AppError> {
     use ort::session::Session;
 
@@ -191,13 +240,14 @@ fn run_ort_inference(
     let input_tensor = ort::value::Tensor::from_array((shape, input_data.to_vec()))
         .map_err(|e| AppError::Image(format!("创建 Tensor 失败: {e}")))?;
 
-    // 尝试官方名称 "pixel_values"，不行则用第一个输入名
-    let input_name = if session.inputs().iter().any(|i| i.name() == "pixel_values") {
-        "pixel_values".to_string()
+    // 优先用模型配置的输入名，找不到回退到首个输入
+    let input_name = if session.inputs().iter().any(|i| i.name() == m.input_name) {
+        m.input_name.to_string()
     } else {
         session.inputs()[0].name().to_string()
     };
-    log::info!("[RMBG] 模型={} 输入名={}", model_id, input_name);
+    log::info!("[RMBG] 模型={} 输入名={} 归一化={:?} 手动sigmoid={}",
+        m.id, input_name, m.norm, !m.sigmoid_output);
 
     let outputs = session
         .run(ort::inputs![input_name.as_str() => input_tensor])
@@ -210,26 +260,43 @@ fn run_ort_inference(
         .try_extract_tensor::<f32>()
         .map_err(|e| AppError::Image(format!("输出解析失败: {e}")))?;
 
+    // 后处理：CrispCut 输出是 logits，需手动 sigmoid；RMBG/ISNet 输出已 sigmoid
+    let probs: Vec<f32> = if m.sigmoid_output {
+        data.to_vec()
+    } else {
+        data.iter().map(|&v| 1.0 / (1.0 + (-v).exp())).collect()
+    };
+
+    // ISNet 官方 Inference.py 在 sigmoid 后还做 min-max 归一化（拉伸到 [0,1] 提升对比度）
+    let probs: Vec<f32> = if m.id == "isnet-general-use" {
+        let mn = probs.iter().fold(f32::INFINITY, |a, &b| a.min(b));
+        let mx = probs.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+        let range = (mx - mn).max(1e-6);
+        probs.iter().map(|&v| (v - mn) / range).collect()
+    } else {
+        probs
+    };
+
     // ── 调试输出 ──
-    let total = data.len();
+    let total = probs.len();
     let (mut dmin, mut dmax) = (f32::MAX, f32::MIN);
     let mut sum = 0f64;
-    for &v in data.iter() { dmin = dmin.min(v); dmax = dmax.max(v); sum += v as f64; }
+    for &v in probs.iter() { dmin = dmin.min(v); dmax = dmax.max(v); sum += v as f64; }
     let avg = sum / total as f64;
     let corners = [
-        ("左上", data[0]),
-        ("右上", data[(w - 1) as usize]),
-        ("左下", data[(h - 1) as usize * w as usize]),
-        ("右下", data[(h * w - 1) as usize]),
-        ("中心", data[(h / 2 * w + w / 2) as usize]),
+        ("左上", probs[0]),
+        ("右上", probs[(w - 1) as usize]),
+        ("左下", probs[(h - 1) as usize * w as usize]),
+        ("右下", probs[(h * w - 1) as usize]),
+        ("中心", probs[(h / 2 * w + w / 2) as usize]),
     ];
-    log::info!("[RMBG] output range=[{:.4},{:.4}] avg={:.4} threshold={}", dmin, dmax, avg, threshold);
+    log::info!("[RMBG] output range=[{:.4},{:.4}] avg={:.4}", dmin, dmax, avg);
     for (label, v) in &corners {
         log::info!("[RMBG]   {}: {:.4}", label, v);
     }
 
     // ── 调试：保存原始 mask ──
-    let raw: Vec<u8> = data.iter().map(|&v| (v * 255.0).clamp(0.0, 255.0) as u8).collect();
+    let raw: Vec<u8> = probs.iter().map(|&v| (v * 255.0).clamp(0.0, 255.0) as u8).collect();
     if let Some(mask_img) = image::GrayImage::from_raw(w, h, raw) {
         let mut debug_path = model_path.to_path_buf();
         debug_path.set_extension("debug.png");
@@ -237,13 +304,7 @@ fn run_ort_inference(
         log::info!("[RMBG] 保存调试 mask: {:?}", debug_path);
     }
 
-    // 默认官方方案：模型输出直接作为 alpha。阈值 > 0 时启用裁切。
-    let mask: Vec<u8> = if threshold > 0.01 {
-        data.iter().map(|&v| {
-            if v >= threshold as f32 { (v * 255.0).clamp(0.0, 255.0) as u8 } else { 0u8 }
-        }).collect()
-    } else {
-        data.iter().map(|&v| (v * 255.0).clamp(0.0, 255.0) as u8).collect()
-    };
+    // 输出直接作为 alpha（已 sigmoid，范围 [0,1]）
+    let mask: Vec<u8> = probs.iter().map(|&v| (v * 255.0).clamp(0.0, 255.0) as u8).collect();
     Ok(mask)
 }
