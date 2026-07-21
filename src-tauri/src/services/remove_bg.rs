@@ -182,13 +182,21 @@ pub fn run_inference(model_dir: &Path, image_bytes: &[u8], threshold: f64, model
         image::imageops::FilterType::Triangle,  // Triangle = bilinear kernel
     );
 
-    // 合成 RGBA
+    // 合成 RGBA + 回填空洞：mask 判为透明、但原图明显非背景白的像素，强制不透明
+    // 解决 logo/图标类「主体内部白色填充被误判为背景挖空」的问题
     let mut rgba = img.to_rgba8();
     for y in 0..orig_h {
         for x in 0..orig_w {
             let alpha = mask_resized.get_pixel(x, y)[0];
             let pixel = rgba.get_pixel_mut(x, y);
-            pixel[3] = alpha;
+            if alpha < 128 {
+                // mask 判为透明：再检查原图像素，非背景白则回填（保留物体内部填充）
+                let [r, g, b, _] = pixel.0;
+                let is_background_white = r >= 240 && g >= 240 && b >= 240;
+                pixel[3] = if is_background_white { 0 } else { 255 };
+            } else {
+                pixel[3] = alpha;
+            }
         }
     }
 
