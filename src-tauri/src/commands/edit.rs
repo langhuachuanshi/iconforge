@@ -2,7 +2,7 @@ use base64::Engine;
 use tauri::State;
 
 use crate::error::AppError;
-use crate::models::{CropRequest, ImageResponse, RemoveBgRequest, BgModelEntry};
+use crate::models::{CropRequest, ImageResponse, RemoveBgRequest, RemoveColorRequest, BgModelEntry};
 use crate::services;
 use crate::AppState;
 
@@ -171,6 +171,25 @@ pub async fn remove_background(
 
     let result = tokio::task::spawn_blocking(move || {
         services::remove_bg::run_inference(&model_dir, &bytes, threshold, &mid)
+    })
+    .await
+    .map_err(|e| AppError::Image(e.to_string()))??;
+
+    Ok(ImageResponse {
+        image: base64::engine::general_purpose::STANDARD.encode(&result),
+        format: "PNG".into(),
+    })
+}
+
+/// 按颜色去底（魔棒/色键）
+#[tauri::command]
+pub async fn remove_color(req: RemoveColorRequest) -> Result<ImageResponse, AppError> {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(&req.image)?;
+    let color = req.color;
+    let tolerance = req.tolerance.clamp(0.0, 442.0);
+
+    let result = tokio::task::spawn_blocking(move || {
+        services::image::remove_color(&bytes, color, tolerance)
     })
     .await
     .map_err(|e| AppError::Image(e.to_string()))??;

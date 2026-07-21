@@ -84,6 +84,18 @@ fn default_threshold() -> f64 {
     0.45
 }
 
+/// 按颜色去底请求（魔棒/色键）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveColorRequest {
+    /// base64 编码的原图
+    pub image: String,
+    /// 目标背景色 RGB（0~255）
+    pub color: [u8; 3],
+    /// 容差（0~442，越大去掉的颜色范围越宽）
+    pub tolerance: f32,
+}
+
 /// 图片响应（裁剪、抠图等操作共用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -98,6 +98,22 @@ export async function removeBackground(image: string): Promise<string> {
   }
 }
 
+/** 按颜色去底（魔棒/色键）。color 为 [r,g,b]，tolerance 0~442 */
+export async function removeColor(
+  image: string,
+  color: [number, number, number],
+  tolerance: number,
+): Promise<string> {
+  try {
+    const result = await invoke<{ image: string }>('remove_color', {
+      req: { image, color, tolerance },
+    })
+    return result.image
+  } catch (e: any) {
+    throw new Error(typeof e === 'string' ? e : e?.message || '去底色失败')
+  }
+}
+
 /**
  * 导出图标：弹出保存对话框，Rust 后端直接写入用户选定的文件路径
  */

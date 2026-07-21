@@ -77,6 +77,31 @@ pub fn composite_on_white_and_encode(img: &RgbaImage, format: image::ImageFormat
     Ok(buf)
 }
 
+/// 按颜色去底（色键/魔棒）：与目标色距离 ≤ tolerance 的像素设为透明，其余保留
+///
+/// 适合 logo/图标去白底场景，比抠图模型更可控。
+/// 距离用 RGB 欧氏距离，tolerance 范围 0~442（sqrt(3*255²)）。
+pub fn remove_color(image_bytes: &[u8], target: [u8; 3], tolerance: f32) -> Result<Vec<u8>, AppError> {
+    let mut img = decode_rgba(image_bytes)?;
+
+    // 距离平方阈值（避免每个像素开方）
+    let tol_sq = tolerance * tolerance;
+
+    for pixel in img.pixels_mut() {
+        let dr = pixel[0] as f32 - target[0] as f32;
+        let dg = pixel[1] as f32 - target[1] as f32;
+        let db = pixel[2] as f32 - target[2] as f32;
+        let dist_sq = dr * dr + dg * dg + db * db;
+        if dist_sq <= tol_sq {
+            pixel[3] = 0; // 命中背景色 → 透明
+        } else if pixel[3] > 0 {
+            // 不透明像素保留原 alpha（已经是 255 或已抠图的半透明）
+        }
+    }
+
+    encode_png(&img)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

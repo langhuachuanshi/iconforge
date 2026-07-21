@@ -52,6 +52,7 @@ pub fn run() {
             commands::edit::import_bg_model,
             commands::edit::save_image_file,
             commands::edit::remove_background,
+            commands::edit::remove_color,
             commands::export::export_icon_to_file,
             commands::generate::get_providers,
             commands::generate::get_templates,

@@ -5,6 +5,7 @@ import {
   cropImage,
   exportIcon,
   removeBackground,
+  removeColor,
   downloadBgModel,
   listBgModels,
   getConfig,
@@ -147,6 +148,46 @@ async function confirmCrop() {
     syncImage(await cropImage({ image: image.value, x, y, width: w, height: h }))
     ElMessage.success('裁剪完成')
   } catch (e: any) { ElMessage.error(`裁剪失败：${e?.message || e}`) } finally { processing.value = false }
+}
+
+// ── 去底色（魔棒/色键）──
+const colorActive = ref(false)
+const bgColor = ref('#ffffff')
+const colorTolerance = ref(60)
+
+function startRemoveColor() {
+  if (!image.value) return
+  colorActive.value = true
+}
+
+function cancelRemoveColor() {
+  colorActive.value = false
+}
+
+// hex (#rrggbb) → [r,g,b]
+function hexToRgb(hex: string): [number, number, number] {
+  const m = hex.replace('#', '')
+  return [
+    parseInt(m.slice(0, 2), 16) || 0,
+    parseInt(m.slice(2, 4), 16) || 0,
+    parseInt(m.slice(4, 6), 16) || 0,
+  ]
+}
+
+async function applyRemoveColor() {
+  if (!image.value) return
+  pushHistory()
+  processing.value = true
+  try {
+    const result = await removeColor(image.value, hexToRgb(bgColor.value), colorTolerance.value)
+    syncImage(result)
+    ElMessage.success('去底色完成')
+  } catch (e: any) {
+    ElMessage.error(`去底色失败：${e?.message || e}`)
+  } finally {
+    processing.value = false
+    colorActive.value = false
+  }
 }
 
 // ── 手动修补 ──
@@ -442,7 +483,7 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
         <!-- 编辑 -->
         <el-card>
           <template #header>编辑</template>
-          <template v-if="!cropActive && !touchupActive">
+          <template v-if="!cropActive && !touchupActive && !colorActive">
             <el-button :disabled="processing" @click="startCrop" style="width:100%">
               <el-icon><Crop /></el-icon> 裁剪
             </el-button>
@@ -456,6 +497,21 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
             <div class="btn-row"><el-button type="primary" @click="confirmCrop" style="flex:1">确认</el-button>
             <el-button @click="cancelCrop" style="flex:1">取消</el-button></div>
             <p class="tool-desc">滚轮缩放，拖拽移动图片，框内为裁剪结果</p>
+          </template>
+          <template v-else-if="colorActive">
+            <div style="margin-bottom:8px">
+              <span class="tool-desc">背景色</span>
+              <el-color-picker v-model="bgColor" size="small" style="width:100%; margin-top:4px" />
+            </div>
+            <div style="margin-bottom:8px">
+              <span class="tool-desc">容差：{{ colorTolerance }}</span>
+              <el-slider v-model="colorTolerance" :min="0" :max="200" size="small" />
+            </div>
+            <div class="btn-row">
+              <el-button type="primary" @click="applyRemoveColor" :loading="processing" style="flex:1">应用</el-button>
+              <el-button @click="cancelRemoveColor" style="flex:1">取消</el-button>
+            </div>
+            <p class="tool-desc">容差越大去掉的颜色范围越宽</p>
           </template>
           <template v-else>
             <div style="margin-bottom:8px">
@@ -471,10 +527,15 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
             <div class="btn-row"><el-button type="primary" @click="applyTouchup" :loading="processing" style="flex:1">应用</el-button>
             <el-button @click="cancelTouchup" style="flex:1">取消</el-button></div>
           </template>
-          <el-divider v-if="!cropActive && !touchupActive" />
-          <template v-if="!cropActive && !touchupActive">
+          <el-divider v-if="!cropActive && !touchupActive && !colorActive" />
+          <template v-if="!cropActive && !touchupActive && !colorActive">
+            <el-button type="primary" :disabled="processing || !image" @click="startRemoveColor" style="width:100%">
+              <el-icon><Aim /></el-icon> 去底色
+            </el-button>
+            <p class="tool-desc">按颜色去透明，适合 AI 生成的白底图标</p>
+            <el-divider />
             <div class="bg-model-picker">
-              <span class="tool-desc">抠图模型</span>
+              <span class="tool-desc">智能抠图模型（备选）</span>
               <el-select
                 :model-value="currentBgModelId"
                 size="small"
@@ -497,7 +558,7 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
               <el-icon><MagicStick /></el-icon> 智能抠图
             </el-button>
             <el-progress v-if="downloading" :percentage="downloadPct" :stroke-width="6" style="margin-top:8px" />
-            <p class="tool-desc">AI 本地抠图（首次自动下载模型）</p>
+            <p class="tool-desc">AI 识别物体（适合照片/复杂背景）</p>
             <el-divider />
             <el-button :disabled="processing || !image" @click="startTouchup" style="width:100%">
               <el-icon><Brush /></el-icon> 手动修补
