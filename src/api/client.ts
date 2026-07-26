@@ -98,6 +98,18 @@ export async function removeBackground(image: string): Promise<string> {
   }
 }
 
+/** 云端抠图（阿里云分割抠图），需在设置中配置 AccessKey */
+export async function removeBackgroundCloud(image: string): Promise<string> {
+  try {
+    const result = await invoke<{ image: string }>('remove_background_cloud', {
+      req: { image, threshold: 0.0 }
+    })
+    return result.image
+  } catch (e: any) {
+    throw new Error(typeof e === 'string' ? e : e?.message || '云端抠图失败')
+  }
+}
+
 /** 按颜色去底（魔棒/色键）。color 为 [r,g,b]，tolerance 0~442 */
 export async function removeColor(
   image: string,

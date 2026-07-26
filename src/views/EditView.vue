@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   cropImage,
   exportIcon,
   removeBackground,
+  removeBackgroundCloud,
   removeColor,
   downloadBgModel,
   listBgModels,
@@ -16,6 +18,7 @@ import {
 } from '../api/client'
 import { useWorkspaceStore } from '../stores/workspace'
 
+const router = useRouter()
 const workspace = useWorkspaceStore()
 const image = ref('')
 const processing = ref(false)
@@ -28,6 +31,10 @@ const bgModels = ref<BgModelEntry[]>([])
 const currentBgModelId = ref('')
 
 const downloadedBgModels = computed(() => bgModels.value.filter(m => m.downloaded))
+
+// ── 抠图引擎（local 本地模型 / cloud 云端 remove.bg）──
+const engine = ref<'local' | 'cloud'>('local')
+const cloudKeyConfigured = ref(false)
 
 // ── 画布 ──
 const canvasRef = ref<HTMLElement>()
@@ -196,7 +203,6 @@ const touchupPainting = ref(false)
 const touchupMode = ref<'erase' | 'restore'>('erase')
 const touchupBrushSize = ref(20)
 const touchupCanvas = ref<HTMLCanvasElement>()
-const previewCanvas = ref<HTMLCanvasElement>() // 抠图前的原图
 
 function startTouchup() {
   if (!image.value) return
@@ -292,6 +298,15 @@ async function loadBgModels() {
   } catch { /* 静默 */ }
 }
 
+// ── 加载抠图引擎配置 ──
+async function loadEngineConfig() {
+  try {
+    const cfg = await getConfig()
+    engine.value = cfg.bg_engine === 'cloud' ? 'cloud' : 'local'
+    cloudKeyConfigured.value = !!(cfg.aliyun_ak && cfg.aliyun_sk)
+  } catch { /* 静默，默认 local */ }
+}
+
 async function onBgModelChange(id: string) {
   // 切换当前模型到后端配置
   try {
@@ -306,7 +321,23 @@ async function onBgModelChange(id: string) {
   }
 }
 
+async function onEngineChange(val: 'local' | 'cloud') {
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('set_config', { key: 'bg_engine', value: val })
+    engine.value = val
+  } catch (e: any) {
+    ElMessage.error('切换引擎失败：' + (e?.message || e))
+    engine.value = val === 'cloud' ? 'local' : 'cloud' // 回滚 UI
+  }
+}
+
+function goToSettings() {
+  router.push('/settings')
+}
+
 onMounted(loadBgModels)
+onMounted(loadEngineConfig)
 
 // ── 初始化 ──
 watch(() => workspace.currentImage, (val) => {
@@ -360,6 +391,23 @@ async function handleClose() {
 // ── 智能抠图 ──
 async function handleRemoveBg() {
   if (!image.value) return
+
+  // 云端引擎分支
+  if (engine.value === 'cloud') {
+    if (!cloudKeyConfigured.value) {
+      ElMessage.warning('请先在设置中配置阿里云 AccessKey')
+      return
+    }
+    pushHistory()
+    processing.value = true
+    try {
+      syncImage(await removeBackgroundCloud(image.value))
+      ElMessage.success('云端抠图完成')
+    } catch (e: any) { ElMessage.error(`抠图失败：${e?.message || e}`) } finally { processing.value = false }
+    return
+  }
+
+  // 本地引擎分支（原逻辑）
   // 当前模型没下载：提示是否下载
   const cur = bgModels.value.find(m => m.id === currentBgModelId.value)
   const downloaded = cur?.downloaded ?? false
@@ -534,31 +582,60 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
             </el-button>
             <p class="tool-desc">按颜色去透明，适合 AI 生成的白底图标</p>
             <el-divider />
-            <div class="bg-model-picker">
-              <span class="tool-desc">智能抠图模型（备选）</span>
-              <el-select
-                :model-value="currentBgModelId"
+            <div class="engine-switch">
+              <span class="tool-desc">抠图引擎</span>
+              <el-radio-group
+                :model-value="engine"
                 size="small"
                 style="width:100%; margin-top:4px"
-                placeholder="无可用模型"
-                @change="onBgModelChange"
+                @change="onEngineChange"
               >
-                <el-option
-                  v-for="m in downloadedBgModels"
-                  :key="m.id"
-                  :value="m.id"
-                  :label="m.name"
-                />
-              </el-select>
-              <p v-if="!downloadedBgModels.length" class="tool-desc" style="color: var(--el-color-warning)">
-                尚未下载任何模型，点击下方按钮下载
-              </p>
+                <el-radio-button value="local">本地模型</el-radio-button>
+                <el-radio-button value="cloud">云端 阿里云</el-radio-button>
+              </el-radio-group>
             </div>
-            <el-button :disabled="processing || downloading || !downloadedBgModels.length" @click="handleRemoveBg" style="width:100%; margin-top:8px">
-              <el-icon><MagicStick /></el-icon> 智能抠图
-            </el-button>
-            <el-progress v-if="downloading" :percentage="downloadPct" :stroke-width="6" style="margin-top:8px" />
-            <p class="tool-desc">AI 识别物体（适合照片/复杂背景）</p>
+            <template v-if="engine === 'local'">
+              <div class="bg-model-picker">
+                <span class="tool-desc">智能抠图模型（备选）</span>
+                <el-select
+                  :model-value="currentBgModelId"
+                  size="small"
+                  style="width:100%; margin-top:4px"
+                  placeholder="无可用模型"
+                  @change="onBgModelChange"
+                >
+                  <el-option
+                    v-for="m in downloadedBgModels"
+                    :key="m.id"
+                    :value="m.id"
+                    :label="m.name"
+                  />
+                </el-select>
+                <p v-if="!downloadedBgModels.length" class="tool-desc" style="color: var(--el-color-warning)">
+                  尚未下载任何模型，点击下方按钮下载
+                </p>
+              </div>
+              <el-button :disabled="processing || downloading || !downloadedBgModels.length" @click="handleRemoveBg" style="width:100%; margin-top:8px">
+                <el-icon><MagicStick /></el-icon> 智能抠图
+              </el-button>
+              <el-progress v-if="downloading" :percentage="downloadPct" :stroke-width="6" style="margin-top:8px" />
+              <p class="tool-desc">AI 识别物体（适合照片/复杂背景）</p>
+            </template>
+            <template v-else>
+              <div class="cloud-status" style="margin-top:8px">
+                <span v-if="cloudKeyConfigured" class="tool-desc" style="color: var(--el-color-success)">
+                  ✓ 阿里云 AccessKey 已配置
+                </span>
+                <span v-else class="tool-desc" style="color: var(--el-color-warning)">
+                  未配置 AccessKey，
+                  <el-link type="primary" :underline="false" @click="goToSettings">前往设置</el-link>
+                </span>
+              </div>
+              <el-button :disabled="processing || !cloudKeyConfigured" @click="handleRemoveBg" style="width:100%; margin-top:8px">
+                <el-icon><MagicStick /></el-icon> 智能抠图（云端）
+              </el-button>
+              <p class="tool-desc">阿里云分割抠图，需联网，约 0.002 元/次</p>
+            </template>
             <el-divider />
             <el-button :disabled="processing || !image" @click="startTouchup" style="width:100%">
               <el-icon><Brush /></el-icon> 手动修补

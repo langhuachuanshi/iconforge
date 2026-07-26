@@ -181,6 +181,32 @@ pub async fn remove_background(
     })
 }
 
+/// 云端抠图（阿里云分割抠图 SegmentCommonImage）
+#[tauri::command]
+pub async fn remove_background_cloud(
+    state: State<'_, AppState>,
+    req: RemoveBgRequest,
+) -> Result<ImageResponse, AppError> {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(&req.image)?;
+    let (ak, sk) = {
+        let storage = state.storage.lock();
+        (
+            storage.get_config("aliyun_ak", ""),
+            storage.get_config("aliyun_sk", ""),
+        )
+    };
+    if ak.is_empty() || sk.is_empty() {
+        return Err(AppError::ProviderError(
+            "未配置阿里云 AccessKey，请在设置中填写".into(),
+        ));
+    }
+    let result = services::aliyun_imageseg::remove_background(&bytes, &ak, &sk).await?;
+    Ok(ImageResponse {
+        image: base64::engine::general_purpose::STANDARD.encode(&result),
+        format: "PNG".into(),
+    })
+}
+
 /// 按颜色去底（魔棒/色键）
 #[tauri::command]
 pub async fn remove_color(req: RemoveColorRequest) -> Result<ImageResponse, AppError> {

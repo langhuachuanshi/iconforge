@@ -13,6 +13,7 @@ import {
   downloadBgModel,
   deleteBgModel,
   openModelLocation,
+  getConfig,
   type ProviderEntry,
   type ProviderUpsertRequest,
   type BgModelEntry,
@@ -25,6 +26,10 @@ const loading = ref(false)
 const bgModels = ref<BgModelEntry[]>([])
 const bgDownloading = ref('')
 const bgDownPct = ref(0)
+
+// 云端抠图（阿里云 VIAPI）AccessKey
+const aliyunAk = ref('')
+const aliyunSk = ref('')
 
 // 编辑对话框
 const dialogVisible = ref(false)
@@ -204,6 +209,24 @@ async function loadBgSettings() {
   } catch (e: any) {
     ElMessage.error('加载模型列表失败：' + (e?.message || e))
   }
+  try {
+    const cfg = await getConfig()
+    aliyunAk.value = cfg.aliyun_ak ?? ''
+    aliyunSk.value = cfg.aliyun_sk ?? ''
+  } catch { /* 静默 */ }
+}
+
+async function saveAliyunKeys() {
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('set_config', { key: 'aliyun_ak', value: aliyunAk.value.trim() })
+    await invoke('set_config', { key: 'aliyun_sk', value: aliyunSk.value.trim() })
+    aliyunAk.value = aliyunAk.value.trim()
+    aliyunSk.value = aliyunSk.value.trim()
+    ElMessage.success('AccessKey 已保存')
+  } catch (e: any) {
+    ElMessage.error('保存失败：' + (e?.message || e))
+  }
 }
 
 async function refreshBgModels() {
@@ -327,6 +350,33 @@ async function openLocation(id: string) {
       </el-tab-pane>
 
       <el-tab-pane label="抠图" lazy>
+        <div class="cloud-bg-section">
+          <el-card shadow="hover" class="cloud-bg-card">
+            <div class="bg-card-row">
+              <span class="bg-card-name">云端抠图（阿里云分割抠图）</span>
+              <el-tag size="small" type="info" effect="plain">国内</el-tag>
+            </div>
+            <p class="tool-desc">
+              阿里云视觉智能 SegmentCommonImage，约 0.002 元/次。需 RAM 用户并授予 AliyunVIAPIFullAccess 权限。
+              <el-link type="primary" href="https://help.aliyun.com/zh/viapi/developer-reference/api-k8cs8t" target="_blank" :underline="false">查看文档</el-link>
+            </p>
+            <el-input
+              v-model="aliyunAk"
+              placeholder="AccessKey ID（如 LTAI...）"
+              size="small"
+              style="margin-top:4px"
+            />
+            <el-input
+              v-model="aliyunSk"
+              type="password"
+              show-password
+              placeholder="AccessKey Secret"
+              size="small"
+              style="margin-top:8px"
+            />
+            <el-button type="primary" size="small" @click="saveAliyunKeys" style="margin-top:8px">保存</el-button>
+          </el-card>
+        </div>
         <div class="bg-model-list">
           <el-card v-for="m in bgModels" :key="m.id" shadow="hover" class="bg-model-card" :class="{ selected: m.current }">
             <div class="bg-card-body">
@@ -484,6 +534,11 @@ async function openLocation(id: string) {
 }
 
 .bg-model-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+
+/* 云端抠图卡片 */
+.cloud-bg-section { margin-bottom: 16px; max-width: 480px; }
+.cloud-bg-card .tool-desc { font-size: 12px; color: var(--el-text-color-secondary); margin: 6px 0; line-height: 1.5; }
+.cloud-bg-card .bg-card-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 14px; }
 .bg-model-card { flex: 1; min-width: 0; }
 .bg-model-card.selected { border-color: var(--el-color-primary); }
 .bg-card-body { margin-bottom: 12px; }

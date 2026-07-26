@@ -7,9 +7,6 @@ const icons = ref<ExtractedIcon[]>([])
 const processing = ref(false)
 const filePath = ref('')
 
-/** 所有条目（每个尺寸一张） */
-const allEntries = computed(() => icons.value)
-
 /** 按组聚合：组名 → 该组所有尺寸条目（用于「导出整组 ICO」去重） */
 const groups = computed(() => {
   const map = new Map<string, ExtractedIcon[]>()
