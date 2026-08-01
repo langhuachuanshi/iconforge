@@ -30,6 +30,8 @@ const bgDownPct = ref(0)
 // 云端抠图（阿里云 VIAPI）AccessKey
 const aliyunAk = ref('')
 const aliyunSk = ref('')
+const aliyunModel = ref<'common' | 'commodity'>('common')
+const aliyunDialogVisible = ref(false)
 
 // 编辑对话框
 const dialogVisible = ref(false)
@@ -213,6 +215,7 @@ async function loadBgSettings() {
     const cfg = await getConfig()
     aliyunAk.value = cfg.aliyun_ak ?? ''
     aliyunSk.value = cfg.aliyun_sk ?? ''
+    aliyunModel.value = cfg.cloud_model === 'commodity' ? 'commodity' : 'common'
   } catch { /* 静默 */ }
 }
 
@@ -224,8 +227,20 @@ async function saveAliyunKeys() {
     aliyunAk.value = aliyunAk.value.trim()
     aliyunSk.value = aliyunSk.value.trim()
     ElMessage.success('AccessKey 已保存')
+    aliyunDialogVisible.value = false
   } catch (e: any) {
     ElMessage.error('保存失败：' + (e?.message || e))
+  }
+}
+
+async function onAliyunModelChange(val: 'common' | 'commodity') {
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('set_config', { key: 'cloud_model', value: val })
+    aliyunModel.value = val
+    ElMessage.success(`默认模型已设为 ${val === 'commodity' ? '商品分割' : '通用分割'}`)
+  } catch (e: any) {
+    ElMessage.error('切换失败：' + (e?.message || e))
   }
 }
 
@@ -319,7 +334,7 @@ async function openLocation(id: string) {
     <h2 class="page-title">设置</h2>
 
     <el-tabs>
-      <el-tab-pane label="服务商" lazy>
+      <el-tab-pane label="生图服务" lazy>
         <div class="toolbar">
           <el-button type="primary" @click="openAdd">
             <el-icon><Plus /></el-icon> 新增服务商
@@ -330,102 +345,86 @@ async function openLocation(id: string) {
           <div
             v-for="(row, idx) in providers"
             :key="row.id"
-            class="provider-row"
+            class="provider-row svc-card"
             :class="{ 'drag-src': dragIdx === idx, 'drop-target': dropIdx === idx && dragIdx !== idx }"
             @mousedown="onRowMouseDown(idx, $event)"
           >
-            <div class="row-info">
-              <span class="row-name">{{ row.name }}</span>
-              <el-tag size="small" type="warning" effect="plain">{{ row.model || '默认' }}</el-tag>
-              <el-tag v-if="row.apiKey" size="small" type="success" effect="plain">已配置</el-tag>
-              <el-tag v-else size="small" type="info" effect="plain">未配置</el-tag>
+            <div class="row-main">
+              <div class="row-top">
+                <span class="row-name">{{ row.name }}</span>
+                <el-tag v-if="row.apiKey" size="small" type="success" effect="plain">已配置</el-tag>
+                <el-tag v-else size="small" type="info" effect="plain">未配置</el-tag>
+              </div>
+              <div class="row-meta">
+                <span class="row-model">{{ row.model || '默认' }}</span>
+              </div>
             </div>
-            <el-switch :model-value="row.enabled" @change="handleToggle(row)" size="small" />
             <div class="row-actions">
-              <el-button text size="small" type="primary" @click="openEdit(row)">编辑</el-button>
+              <el-switch :model-value="row.enabled" @change="handleToggle(row)" size="small" />
+              <el-button text size="small" type="primary" @click="openEdit(row)">设置</el-button>
               <el-button text size="small" type="danger" @click="handleDelete(row)">删除</el-button>
             </div>
           </div>
         </div>
       </el-tab-pane>
 
-      <el-tab-pane label="抠图" lazy>
-        <div class="cloud-bg-section">
-          <el-card shadow="hover" class="cloud-bg-card">
-            <div class="bg-card-row">
-              <span class="bg-card-name">云端抠图（阿里云分割抠图）</span>
-              <el-tag size="small" type="info" effect="plain">国内</el-tag>
+      <el-tab-pane label="抠图服务" lazy>
+        <h3 class="section-title">云端服务</h3>
+        <div class="provider-list">
+          <div class="svc-card provider-row">
+            <div class="row-main">
+              <div class="row-top">
+                <span class="row-name">阿里云分割抠图</span>
+                <el-tag v-if="aliyunAk && aliyunSk" size="small" type="success" effect="plain">已配置</el-tag>
+                <el-tag v-else size="small" type="info" effect="plain">未配置</el-tag>
+              </div>
+              <div class="row-meta">
+                <span class="row-model">{{ aliyunModel === 'commodity' ? '商品分割' : '通用分割' }} · 国内 · 约 0.002 元/次</span>
+              </div>
             </div>
-            <p class="tool-desc">
-              阿里云视觉智能 SegmentCommonImage，约 0.002 元/次。需 RAM 用户并授予 AliyunVIAPIFullAccess 权限。
-              <el-link type="primary" href="https://help.aliyun.com/zh/viapi/developer-reference/api-k8cs8t" target="_blank" :underline="false">查看文档</el-link>
-            </p>
-            <el-input
-              v-model="aliyunAk"
-              placeholder="AccessKey ID（如 LTAI...）"
-              size="small"
-              style="margin-top:4px"
-            />
-            <el-input
-              v-model="aliyunSk"
-              type="password"
-              show-password
-              placeholder="AccessKey Secret"
-              size="small"
-              style="margin-top:8px"
-            />
-            <el-button type="primary" size="small" @click="saveAliyunKeys" style="margin-top:8px">保存</el-button>
-          </el-card>
+            <div class="row-actions">
+              <el-button text size="small" type="primary" @click="aliyunDialogVisible = true">设置</el-button>
+            </div>
+          </div>
         </div>
-        <div class="bg-model-list">
-          <el-card v-for="m in bgModels" :key="m.id" shadow="hover" class="bg-model-card" :class="{ selected: m.current }">
-            <div class="bg-card-body">
-              <div class="bg-card-row">
-                <span class="bg-card-name">{{ m.name }}</span>
+
+        <el-divider />
+
+        <h3 class="section-title">本地模型</h3>
+        <div class="provider-list">
+          <div v-for="m in bgModels" :key="m.id" class="svc-card provider-row bg-model-card" :class="{ selected: m.current }">
+            <div class="row-main">
+              <div class="row-top">
+                <span class="row-name">{{ m.name }}</span>
                 <el-tag v-if="m.current" type="success" size="small">使用中</el-tag>
                 <el-tag v-else-if="m.downloaded" type="info" size="small">已下载</el-tag>
                 <el-tag v-else type="warning" size="small" effect="plain">未下载</el-tag>
               </div>
-              <div class="bg-card-row bg-meta-row">大小：{{ m.size }}</div>
-              <el-progress v-if="bgDownloading === m.id" :percentage="bgDownPct" :stroke-width="6" style="margin: 8px 0" />
+              <div class="row-meta">
+                <span class="row-model">大小：{{ m.size }}</span>
+              </div>
+              <el-progress v-if="bgDownloading === m.id" :percentage="bgDownPct" :stroke-width="6" style="margin-top: 6px" />
             </div>
-            <div class="bg-card-actions">
+            <div class="row-actions">
               <!-- 未下载：主操作下载 -->
               <template v-if="!m.downloaded">
-                <el-button size="small" type="primary" :loading="bgDownloading === m.id" @click="downloadModel(m.id)">
-                  <el-icon><Download /></el-icon>&nbsp;下载
-                </el-button>
-                <el-button class="is-icon" size="small" @click="importModel(m.id)" title="导入本地 ONNX">
-                  <el-icon><Upload /></el-icon>
-                </el-button>
+                <el-button text size="small" type="primary" :loading="bgDownloading === m.id" @click="downloadModel(m.id)">下载</el-button>
+                <el-button text size="small" @click="importModel(m.id)" title="导入本地 ONNX">导入</el-button>
               </template>
               <!-- 已下载但非当前：主操作选用 -->
               <template v-else-if="!m.current">
-                <el-button size="small" type="primary" @click="selectModel(m.id)">
-                  <el-icon><Check /></el-icon>&nbsp;选用
-                </el-button>
-                <el-button class="is-icon" size="small" @click="importModel(m.id)" title="重新导入">
-                  <el-icon><Upload /></el-icon>
-                </el-button>
-                <el-button class="is-icon" size="small" @click="openLocation(m.id)" title="打开文件位置">
-                  <el-icon><FolderOpened /></el-icon>
-                </el-button>
-                <el-button class="is-icon" size="small" type="danger" @click="deleteModel(m.id)" title="删除模型">
-                  <el-icon><Delete /></el-icon>
-                </el-button>
+                <el-button text size="small" type="primary" @click="selectModel(m.id)">选用</el-button>
+                <el-button text size="small" @click="importModel(m.id)" title="重新导入">导入</el-button>
+                <el-button text size="small" @click="openLocation(m.id)" title="打开文件位置">位置</el-button>
+                <el-button text size="small" type="danger" @click="deleteModel(m.id)">删除</el-button>
               </template>
               <!-- 当前使用 -->
               <template v-else>
-                <el-button size="small" type="success" disabled>当前使用</el-button>
-                <el-button class="is-icon" size="small" @click="openLocation(m.id)" title="打开文件位置">
-                  <el-icon><FolderOpened /></el-icon>
-                </el-button>
-                <el-button class="is-icon" size="small" type="danger" @click="deleteModel(m.id)" title="删除模型">
-                  <el-icon><Delete /></el-icon>
-                </el-button>
+                <el-button text size="small" @click="openLocation(m.id)" title="打开文件位置">位置</el-button>
+                <el-button text size="small" type="danger" @click="deleteModel(m.id)">删除</el-button>
               </template>
             </div>
-          </el-card>
+          </div>
         </div>
       </el-tab-pane>
 
@@ -469,6 +468,38 @@ async function openLocation(id: string) {
         <el-button type="primary" :loading="saving" @click="handleSave">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 阿里云抠图设置对话框 -->
+    <el-dialog
+      v-model="aliyunDialogVisible"
+      title="阿里云分割抠图 设置"
+      width="520px"
+      :close-on-click-modal="false"
+    >
+      <p class="tool-desc">
+        阿里云视觉智能 VIAPI，约 0.002 元/次。需 RAM 用户并授予 AliyunVIAPIFullAccess 权限。
+        <el-link type="primary" href="https://help.aliyun.com/zh/viapi/developer-reference/api-k8cs8t" target="_blank" :underline="false">查看文档</el-link>
+      </p>
+      <el-form label-position="top">
+        <el-form-item label="AccessKey ID">
+          <el-input v-model="aliyunAk" placeholder="如 LTAI..." size="small" />
+        </el-form-item>
+        <el-form-item label="AccessKey Secret">
+          <el-input v-model="aliyunSk" type="password" show-password placeholder="AccessKey Secret" size="small" />
+        </el-form-item>
+        <el-form-item label="默认模型">
+          <el-select :model-value="aliyunModel" size="small" style="width:100%" @change="onAliyunModelChange">
+            <el-option value="common" label="通用分割" />
+            <el-option value="commodity" label="商品分割" />
+          </el-select>
+          <span class="tool-desc">商品分割对实拍/产品图标更佳，不适合卡通图；编辑页可临时切换</span>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="aliyunDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveAliyunKeys">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -482,21 +513,25 @@ async function openLocation(id: string) {
   margin-bottom: 16px;
 }
 
-/* 服务商列表 */
+/* 三套卡片统一基准 */
+.svc-card {
+  padding: 12px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  background: var(--el-bg-color);
+}
+
+/* 服务商列表（生图 / 阿里云） */
 .provider-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 8px;
 }
 
 .provider-row {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 6px;
-  background: var(--el-bg-color);
   cursor: grab;
   user-select: none;
 }
@@ -511,12 +546,25 @@ async function openLocation(id: string) {
 }
 
 
-.row-info {
+.row-main {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.row-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.row-meta {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-width: 0;
 }
 
 .row-name {
@@ -524,37 +572,37 @@ async function openLocation(id: string) {
   font-size: 14px;
 }
 
+.row-model {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
 .row-actions {
   display: flex;
-  gap: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  align-self: center;
+  flex-shrink: 0;
 }
+/* 干掉 Element Plus 给相邻按钮加的默认 margin-left，统一用 gap 控制间距 */
+.row-actions .el-button + .el-button { margin-left: 0; }
 
 .text-muted {
   color: var(--el-text-color-secondary);
 }
 
-.bg-model-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
-
-/* 云端抠图卡片 */
-.cloud-bg-section { margin-bottom: 16px; max-width: 480px; }
-.cloud-bg-card .tool-desc { font-size: 12px; color: var(--el-text-color-secondary); margin: 6px 0; line-height: 1.5; }
-.cloud-bg-card .bg-card-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 14px; }
-.bg-model-card { flex: 1; min-width: 0; }
+/* 本地模型（与生图/阿里云共用 .provider-list / .svc-card / .provider-row） */
 .bg-model-card.selected { border-color: var(--el-color-primary); }
-.bg-card-body { margin-bottom: 12px; }
-.bg-card-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 14px; }
-.bg-card-name { font-weight: 600; }
-.bg-meta-row { color: var(--el-text-color-secondary); font-size: 12px; }
-.bg-card-actions {
-  display: flex;
-  gap: 6px;
-  align-items: center;
+
+/* 抠图 tab 分组标题 */
+.section-title {
+  margin: 0 0 12px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
 }
-.bg-card-actions .el-button + .el-button { margin-left: 0; }
-/* 图标按钮：统一正方形，和文字按钮等高 */
-.bg-card-actions .is-icon {
-  width: 32px;
-  padding: 0;
-  flex-shrink: 0;
-}
+
+/* 弹窗内说明文字 */
+.tool-desc { font-size: 12px; color: var(--el-text-color-secondary); margin: 6px 0; line-height: 1.5; }
 </style>

@@ -251,7 +251,7 @@ impl Storage {
 
         let now = Utc::now().to_rfc3339();
         let defaults = [
-            ("tongyi", "通义万相", "阿里云 DashScope（异步提交）", "https://bailian.console.aliyun.com", "https://dashscope.aliyuncs.com", "qwen-image-2.0-pro"),
+            ("tongyi", "通义万相", "阿里云百炼 通义万象（DashScope）", "https://bailian.console.aliyun.com", "https://dashscope.aliyuncs.com", "wanx2.1-t2i-turbo"),
             ("doubao", "豆包 Seedream", "字节跳动火山引擎", "https://console.volcengine.com/ark", "https://ark.cn-beijing.volces.com/api/v3/images/generations", "doubao-seedream-2.0"),
             ("cogview", "智谱 CogView", "智谱 AI 开放平台", "https://bigmodel.cn", "https://open.bigmodel.cn/api/paas/v4/images/generations", "cogview-3"),
         ];
