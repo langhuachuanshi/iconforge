@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, h, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { ElNotification, ElButton } from 'element-plus'
+import { hasDesktopShortcut, createDesktopShortcut, getConfig, setConfig } from './api/client'
 
 const route = useRoute()
 const router = useRouter()
@@ -16,6 +18,47 @@ function handleSelect(index: string) {
 
 appWindow.onResized(async () => {
   isMaximized.value = await appWindow.isMaximized()
+})
+
+// 桌面快捷方式提示：首次运行或桌面无快捷方式时弹通知（右下角）
+// "创建快捷方式" → 创建后关闭；"不再提示" → 持久化配置后关闭
+onMounted(async () => {
+  try {
+    const cfg = await getConfig()
+    if (cfg['shortcut_prompt_dismissed'] === '1') return
+    if (await hasDesktopShortcut()) return
+
+    const notifyInstance = ElNotification({
+      title: '创建桌面快捷方式',
+      position: 'bottom-right',
+      duration: 0, // 不自动关闭，等用户操作
+      showClose: true,
+      // 用 h() 渲染带两个按钮的消息体（ElNotification 原生不支持 actions）
+      message: h('div', { style: 'display:flex;gap:8px;margin-top:6px' }, [
+        h(ElButton, {
+          size: 'small',
+          type: 'primary',
+          onClick: async () => {
+            const ok = await createDesktopShortcut()
+            notifyInstance.close()
+            if (ok) {
+              ElNotification({ title: '已创建', message: '桌面快捷方式已添加', position: 'bottom-right', duration: 2500 })
+            }
+          },
+        }, () => '创建快捷方式'),
+        h(ElButton, {
+          size: 'small',
+          text: true,
+          onClick: async () => {
+            await setConfig('shortcut_prompt_dismissed', '1')
+            notifyInstance.close()
+          },
+        }, () => '不再提示'),
+      ]),
+    })
+  } catch {
+    // 静默失败，不打扰用户
+  }
 })
 </script>
 

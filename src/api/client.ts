@@ -439,3 +439,15 @@ export function toDataUrl(b64: string, format = 'image/png'): string {
   if (b64.startsWith('data:')) return b64
   return `data:${format};base64,${b64}`
 }
+
+// ---------- 桌面快捷方式（Windows）----------
+
+/** 检查桌面是否已有本应用快捷方式 */
+export async function hasDesktopShortcut(): Promise<boolean> {
+  return invoke('has_desktop_shortcut')
+}
+
+/** 创建桌面快捷方式，返回是否成功 */
+export async function createDesktopShortcut(): Promise<boolean> {
+  return invoke('create_desktop_shortcut')
+}

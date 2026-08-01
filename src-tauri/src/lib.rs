@@ -81,6 +81,8 @@ pub fn run() {
             commands::history::delete_icon_version,
             commands::extract::extract_icons,
             commands::convert::convert_images_to_ico,
+            commands::system::has_desktop_shortcut,
+            commands::system::create_desktop_shortcut,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
