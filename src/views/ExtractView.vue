@@ -84,16 +84,16 @@ async function handleExportGroupIco(groupName: string, sample: ExtractedIcon) {
 
 <template>
   <div class="extract-root">
-    <h2 class="page-title">图标提取</h2>
-
-    <!-- 顶部操作栏 -->
-    <div class="toolbar">
-      <el-button type="primary" @click="handlePick" :loading="processing">
-        <el-icon><FolderOpened /></el-icon>&nbsp;选择 PE 文件
-      </el-button>
-      <span v-if="filePath" class="file-path" :title="filePath">{{ filePath }}</span>
-      <el-button v-if="filePath" text @click="load" :loading="processing">重新提取</el-button>
+    <div class="header-row">
+      <h2 class="page-title">图标提取</h2>
+      <div class="header-actions">
+        <el-button type="primary" @click="handlePick" :loading="processing">
+          <el-icon><FolderOpened /></el-icon>&nbsp;选择 PE 文件
+        </el-button>
+        <el-button v-if="filePath" text @click="load" :loading="processing">重新提取</el-button>
+      </div>
     </div>
+    <p v-if="filePath" class="header-hint file-path" :title="filePath">{{ filePath }}</p>
 
     <!-- 提取结果 -->
     <div v-loading="processing" class="result-area">
@@ -147,22 +147,20 @@ async function handleExportGroupIco(groupName: string, sample: ExtractedIcon) {
 <style scoped>
 .extract-root { display: flex; flex-direction: column; height: calc(100vh - 110px); }
 
-.page-title { margin: 0 0 16px; font-size: 22px; }
-
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
+.header-row {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
 }
+.header-actions { display: flex; align-items: center; gap: 12px; }
+.page-title { margin: 0; font-size: 22px; }
+.header-hint { margin: 0 0 12px; font-size: 13px; }
+
 .file-path {
-  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--el-text-color-secondary);
-  font-size: 13px;
   font-family: ui-monospace, monospace;
 }
 

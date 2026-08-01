@@ -97,26 +97,26 @@ async function handleExport() {
 
 <template>
   <div class="export-root">
-    <h2 class="page-title">导出图标</h2>
-
-    <!-- 顶部：添加图片 -->
-    <div class="toolbar">
-      <el-upload
-        :show-file-list="false"
-        :before-upload="onFilePicked"
-        accept="image/png,image/jpeg,image/bmp,image/webp"
-        multiple
-      >
-        <el-button type="primary">
-          <el-icon><Plus /></el-icon>&nbsp;添加图片
-        </el-button>
-      </el-upload>
-      <el-button v-if="images.length" text @click="clearAll">清空</el-button>
-      <span class="hint" v-if="images.length === 0 && !workspace.currentImage">
-        先在「编辑」页准备好图片，或点上方按钮添加本地图片
-      </span>
-      <span class="hint" v-else>共 {{ images.length }} 张</span>
+    <div class="header-row">
+      <h2 class="page-title">导出图标</h2>
+      <div class="header-actions">
+        <el-upload
+          :show-file-list="false"
+          :before-upload="onFilePicked"
+          accept="image/png,image/jpeg,image/bmp,image/webp"
+          multiple
+        >
+          <el-button type="primary">
+            <el-icon><Plus /></el-icon>&nbsp;添加图片
+          </el-button>
+        </el-upload>
+        <el-button v-if="images.length" text @click="clearAll">清空</el-button>
+      </div>
     </div>
+    <p class="header-hint" v-if="images.length === 0 && !workspace.currentImage">
+      先在「编辑」页准备好图片，或点上方按钮添加本地图片
+    </p>
+    <p class="header-hint" v-else>共 {{ images.length }} 张</p>
 
     <!-- 图片列表 -->
     <div class="list-area" v-loading="processing">
@@ -171,15 +171,13 @@ async function handleExport() {
 <style scoped>
 .export-root { display: flex; flex-direction: column; height: calc(100vh - 110px); }
 
-.page-title { margin: 0 0 16px; font-size: 22px; }
-
-.toolbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
+.header-row {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
 }
-.hint { color: var(--el-text-color-secondary); font-size: 13px; }
+.header-actions { display: flex; align-items: center; gap: 12px; }
+.page-title { margin: 0; font-size: 22px; }
+.header-hint { color: var(--el-text-color-secondary); font-size: 13px; margin: 0 0 12px; }
 
 .list-area { flex: 1; overflow-y: auto; min-height: 200px; }
 
