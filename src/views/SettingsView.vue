@@ -14,6 +14,7 @@ import {
   deleteBgModel,
   openModelLocation,
   getConfig,
+  setConfig,
   type ProviderEntry,
   type ProviderUpsertRequest,
   type BgModelEntry,
@@ -221,9 +222,8 @@ async function loadBgSettings() {
 
 async function saveAliyunKeys() {
   try {
-    const { invoke } = await import('@tauri-apps/api/core')
-    await invoke('set_config', { key: 'aliyun_ak', value: aliyunAk.value.trim() })
-    await invoke('set_config', { key: 'aliyun_sk', value: aliyunSk.value.trim() })
+    await setConfig('aliyun_ak', aliyunAk.value.trim())
+    await setConfig('aliyun_sk', aliyunSk.value.trim())
     aliyunAk.value = aliyunAk.value.trim()
     aliyunSk.value = aliyunSk.value.trim()
     ElMessage.success('AccessKey 已保存')
@@ -235,8 +235,7 @@ async function saveAliyunKeys() {
 
 async function onAliyunModelChange(val: 'common' | 'commodity') {
   try {
-    const { invoke } = await import('@tauri-apps/api/core')
-    await invoke('set_config', { key: 'cloud_model', value: val })
+    await setConfig('cloud_model', val)
     aliyunModel.value = val
     ElMessage.success(`默认模型已设为 ${val === 'commodity' ? '商品分割' : '通用分割'}`)
   } catch (e: any) {
@@ -264,8 +263,7 @@ async function selectModel(id: string) {
     return
   }
   try {
-    const { invoke } = await import('@tauri-apps/api/core')
-    await invoke('set_config', { key: 'bg_model', value: id })
+    await setConfig('bg_model', id)
     await refreshBgModels()
     ElMessage.success(`已切换为 ${m.name}`)
   } catch (e: any) {
@@ -278,9 +276,8 @@ async function downloadModel(id: string) {
   if (!m) return
   bgDownloading.value = id; bgDownPct.value = 0
   try {
-    const { invoke } = await import('@tauri-apps/api/core')
     // 下载即选用：同步当前模型
-    await invoke('set_config', { key: 'bg_model', value: id })
+    await setConfig('bg_model', id)
     await downloadBgModel((pct: number) => { bgDownPct.value = Math.round(pct) })
     await refreshBgModels()
     ElMessage.success(`「${m.name}」下载完成，已自动启用`)
@@ -295,7 +292,7 @@ async function importModel(id: string) {
     const selected = await open({ filters: [{ name: 'ONNX 模型', extensions: ['onnx'] }], multiple: false })
     if (!selected) return
     await invoke('import_bg_model', { sourcePath: selected as string, modelId: id })
-    await invoke('set_config', { key: 'bg_model', value: id })
+    await setConfig('bg_model', id)
     await refreshBgModels()
     ElMessage.success('模型已导入，已自动启用')
   } catch (e: any) { ElMessage.error('导入失败：' + (e?.message || e)) }

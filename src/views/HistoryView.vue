@@ -101,7 +101,7 @@ async function handleDelete(icon: IconMeta) {
         :body-style="{ padding: '0' }"
         shadow="hover"
       >
-        <div class="icon-thumb">
+        <div class="icon-thumb checkerboard">
           <img
             v-if="thumbUrls[icon.id]"
             :src="thumbUrls[icon.id]"
@@ -157,14 +157,6 @@ async function handleDelete(icon: IconMeta) {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--el-fill-color-lighter);
-  background-image:
-    linear-gradient(45deg, var(--el-border-color-lighter) 25%, transparent 25%),
-    linear-gradient(-45deg, var(--el-border-color-lighter) 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, var(--el-border-color-lighter) 75%),
-    linear-gradient(-45deg, transparent 75%, var(--el-border-color-lighter) 75%);
-  background-size: 20px 20px;
-  background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
 }
 
 .icon-thumb img {

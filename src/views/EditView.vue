@@ -11,6 +11,7 @@ import {
   downloadBgModel,
   listBgModels,
   getConfig,
+  setConfig,
   savePng,
   toDataUrl,
   blobToBase64,
@@ -312,8 +313,7 @@ async function loadEngineConfig() {
 async function onBgModelChange(id: string) {
   // 切换当前模型到后端配置
   try {
-    const { invoke } = await import('@tauri-apps/api/core')
-    await invoke('set_config', { key: 'bg_model', value: id })
+    await setConfig('bg_model', id)
     currentBgModelId.value = id
     const m = bgModels.value.find(x => x.id === id)
     bgModels.value.forEach(x => x.current = x.id === id)
@@ -325,8 +325,7 @@ async function onBgModelChange(id: string) {
 
 async function onCloudModelChange(val: 'common' | 'commodity') {
   try {
-    const { invoke } = await import('@tauri-apps/api/core')
-    await invoke('set_config', { key: 'cloud_model', value: val })
+    await setConfig('cloud_model', val)
     currentCloudModel.value = val
     ElMessage.success(`已切换为 ${val === 'commodity' ? '商品分割' : '通用分割'}`)
   } catch (e: any) {
@@ -336,8 +335,7 @@ async function onCloudModelChange(val: 'common' | 'commodity') {
 
 async function onEngineChange(val: 'local' | 'cloud') {
   try {
-    const { invoke } = await import('@tauri-apps/api/core')
-    await invoke('set_config', { key: 'bg_engine', value: val })
+    await setConfig('bg_engine', val)
     engine.value = val
   } catch (e: any) {
     ElMessage.error('切换引擎失败：' + (e?.message || e))
@@ -720,15 +718,6 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
 }
 .canvas:active { cursor: grabbing; }
 .canvas-bg { position: absolute; inset: 0; }
-.checkerboard {
-  background-image:
-    linear-gradient(45deg, var(--el-border-color-lighter) 25%, transparent 25%),
-    linear-gradient(-45deg, var(--el-border-color-lighter) 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, var(--el-border-color-lighter) 75%),
-    linear-gradient(-45deg, transparent 75%, var(--el-border-color-lighter) 75%);
-  background-size: 20px 20px; background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
-  background-color: var(--el-fill-color-lighter);
-}
 
 .canvas-img { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
 

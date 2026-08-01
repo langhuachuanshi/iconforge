@@ -189,16 +189,6 @@ function goEdit() {
   border-radius: 6px; padding: 24px; flex: 1;
 }
 
-.checkerboard {
-  background-image:
-    linear-gradient(45deg, var(--el-border-color-lighter) 25%, transparent 25%),
-    linear-gradient(-45deg, var(--el-border-color-lighter) 25%, transparent 25%),
-    linear-gradient(45deg, transparent 75%, var(--el-border-color-lighter) 75%),
-    linear-gradient(-45deg, transparent 75%, var(--el-border-color-lighter) 75%);
-  background-size: 20px 20px; background-position: 0 0, 0 10px, 10px -10px, -10px 0px;
-  background-color: var(--el-fill-color-lighter);
-}
-
 .preview-img { max-width: 100%; max-height: 450px; object-fit: contain; }
 
 .canvas-actions { margin-top: 12px; }
