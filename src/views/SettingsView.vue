@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import type { FormInstance, FormRules } from 'element-plus'
 import {
   listProviders,
@@ -475,7 +476,7 @@ async function openLocation(id: string) {
     >
       <p class="tool-desc">
         阿里云视觉智能 VIAPI，约 0.002 元/次。需 RAM 用户并授予 AliyunVIAPIFullAccess 权限。
-        <el-link type="primary" href="https://help.aliyun.com/zh/viapi/developer-reference/api-k8cs8t" target="_blank" :underline="false">查看文档</el-link>
+        <el-link type="primary" :underline="false" @click.prevent="openUrl('https://help.aliyun.com/zh/viapi/developer-reference/api-k8cs8t')">查看文档</el-link>
       </p>
       <el-form label-position="top">
         <el-form-item label="AccessKey ID">
