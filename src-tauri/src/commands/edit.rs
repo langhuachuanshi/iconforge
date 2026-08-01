@@ -1,8 +1,8 @@
 use base64::Engine;
-use tauri::State;
+use tauri::{Emitter, State, Window};
 
 use crate::error::AppError;
-use crate::models::{CropRequest, ImageResponse, RemoveBgRequest, RemoveColorRequest, BgModelEntry};
+use crate::models::{CropRequest, ImageResponse, RemoveBgRequest, RemoveColorRequest, EdgeRefineRequest, SmartCropRequest, ShapeMaskRequest, AdjustColorRequest, BgModelEntry};
 use crate::services;
 use crate::AppState;
 
@@ -185,6 +185,7 @@ pub async fn remove_background(
 #[tauri::command]
 pub async fn remove_background_cloud(
     state: State<'_, AppState>,
+    window: Window,
     req: RemoveBgRequest,
 ) -> Result<ImageResponse, AppError> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(&req.image)?;
@@ -201,8 +202,13 @@ pub async fn remove_background_cloud(
             "未配置阿里云 AccessKey，请在设置中填写".into(),
         ));
     }
+    // 诊断日志通过事件发到前端 console
+    let logger = move |msg: &str| {
+        let _ = window.emit("aliyun-log", msg);
+    };
     let result =
-        services::aliyun_imageseg::remove_background(&bytes, &ak, &sk, &cloud_model).await?;
+        services::aliyun_imageseg::remove_background(&bytes, &ak, &sk, &cloud_model, &logger)
+            .await?;
     Ok(ImageResponse {
         image: base64::engine::general_purpose::STANDARD.encode(&result),
         format: "PNG".into(),
@@ -222,6 +228,88 @@ pub async fn remove_color(req: RemoveColorRequest) -> Result<ImageResponse, AppE
     .await
     .map_err(|e| AppError::Image(e.to_string()))??;
 
+    Ok(ImageResponse {
+        image: base64::engine::general_purpose::STANDARD.encode(&result),
+        format: "PNG".into(),
+    })
+}
+
+/// 边缘净化：一个命令覆盖 erode(收缩) / feather(羽化) / decontaminate(去色晕) / stroke(内描边)
+#[tauri::command]
+pub async fn edge_refine(req: EdgeRefineRequest) -> Result<ImageResponse, AppError> {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(&req.image)?;
+    let op = req.op;
+    let amount = req.amount.max(0.0);
+    let color = req.color;
+
+    let result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, AppError> {
+        match op.as_str() {
+            "erode" => services::image::erode_alpha(&bytes, amount.round() as u32),
+            "feather" => services::image::feather_alpha(&bytes, amount as f32),
+            "decontaminate" => services::image::decontaminate(&bytes, amount.round().max(1.0) as u32),
+            "stroke" => services::image::add_inner_stroke(&bytes, amount.round() as u32, color),
+            other => Err(AppError::Image(format!("未知边缘净化操作: {other}"))),
+        }
+    })
+    .await
+    .map_err(|e| AppError::Image(e.to_string()))??;
+
+    Ok(ImageResponse {
+        image: base64::engine::general_purpose::STANDARD.encode(&result),
+        format: "PNG".into(),
+    })
+}
+
+/// 智能裁剪：mode=trim(去透明边距) / aspect(按宽高比)
+#[tauri::command]
+pub async fn smart_crop(req: SmartCropRequest) -> Result<ImageResponse, AppError> {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(&req.image)?;
+    let result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, AppError> {
+        if req.ratio_w > 0 || req.ratio_h > 0 {
+            services::image::crop_to_aspect(&bytes, req.ratio_w.max(1), req.ratio_h.max(1))
+        } else {
+            // 默认走 trim
+            services::image::trim_transparent(&bytes, (req.threshold.min(255) as u8))
+        }
+    })
+    .await
+    .map_err(|e| AppError::Image(e.to_string()))??;
+    Ok(ImageResponse {
+        image: base64::engine::general_purpose::STANDARD.encode(&result),
+        format: "PNG".into(),
+    })
+}
+
+/// 应用形状遮罩：shape=rounded(圆角矩形,带radius) / circle(圆形)
+#[tauri::command]
+pub async fn apply_shape_mask(req: ShapeMaskRequest) -> Result<ImageResponse, AppError> {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(&req.image)?;
+    let shape = req.shape;
+    let radius = req.radius;
+    let result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, AppError> {
+        match shape.as_str() {
+            "circle" => services::image::apply_circle_mask(&bytes),
+            _ => services::image::apply_rounded_mask(&bytes, radius),
+        }
+    })
+    .await
+    .map_err(|e| AppError::Image(e.to_string()))??;
+    Ok(ImageResponse {
+        image: base64::engine::general_purpose::STANDARD.encode(&result),
+        format: "PNG".into(),
+    })
+}
+
+/// 调色：亮度/对比度/饱和度
+#[tauri::command]
+pub async fn adjust_color(req: AdjustColorRequest) -> Result<ImageResponse, AppError> {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(&req.image)?;
+    let (b, c, s) = (req.brightness, req.contrast, req.saturation);
+    let result = tokio::task::spawn_blocking(move || {
+        services::image::adjust_brightness_contrast(&bytes, b, c, s)
+    })
+    .await
+    .map_err(|e| AppError::Image(e.to_string()))??;
     Ok(ImageResponse {
         image: base64::engine::general_purpose::STANDARD.encode(&result),
         format: "PNG".into(),

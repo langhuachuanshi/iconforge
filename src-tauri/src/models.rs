@@ -96,6 +96,78 @@ pub struct RemoveColorRequest {
     pub tolerance: f32,
 }
 
+/// 边缘净化请求（一个命令覆盖 erode/feather/decontaminate/stroke 四种操作）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeRefineRequest {
+    /// base64 编码的原图
+    pub image: String,
+    /// 操作类型：erode(收缩) / feather(羽化) / decontaminate(去色晕) / stroke(内描边)
+    pub op: String,
+    /// 通用强度参数：
+    /// - erode/stroke：像素半径（建议 1~5）
+    /// - feather：高斯 sigma（建议 0.5~3.0）
+    /// - decontaminate：邻域搜索半径（建议 2）
+    #[serde(default = "default_edge_amount")]
+    pub amount: f64,
+    /// 仅 stroke 用：描边颜色 RGB，默认黑色
+    #[serde(default = "default_stroke_color")]
+    pub color: [u8; 3],
+}
+
+fn default_edge_amount() -> f64 {
+    2.0
+}
+
+fn default_stroke_color() -> [u8; 3] {
+    [0, 0, 0]
+}
+
+/// 智能裁剪请求：mode=trim(去透明边距) / aspect(按宽高比)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartCropRequest {
+    pub image: String,
+    /// trim: alpha 阈值(0~255)；aspect: 此字段忽略
+    /// aspect: 目标宽高比的宽（与 ratioHigh 配合），如 1:1 传 1,1
+    #[serde(default)]
+    pub threshold: u16,
+    #[serde(default)]
+    pub ratio_w: u32,
+    #[serde(default)]
+    pub ratio_h: u32,
+}
+
+/// 形状遮罩请求：shape=rounded(圆角矩形)/circle(圆形)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeMaskRequest {
+    pub image: String,
+    /// rounded 或 circle
+    #[serde(default = "default_shape")]
+    pub shape: String,
+    /// 仅 rounded 用：圆角半径(像素)
+    #[serde(default)]
+    pub radius: u32,
+}
+
+fn default_shape() -> String {
+    "rounded".into()
+}
+
+/// 调色请求：亮度/对比度/饱和度，各 -100~100
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdjustColorRequest {
+    pub image: String,
+    #[serde(default)]
+    pub brightness: f32,
+    #[serde(default)]
+    pub contrast: f32,
+    #[serde(default)]
+    pub saturation: f32,
+}
+
 /// 图片响应（裁剪、抠图等操作共用）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -124,6 +196,27 @@ pub struct IconMeta {
     pub concept: String,
     pub style: String,
     pub provider: String,
+}
+
+/// 图标编辑版本（工程文件存档点）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionMeta {
+    pub id: String,
+    pub icon_id: String,
+    pub version_no: i64,
+    pub created_at: String,
+    pub note: String,
+}
+
+/// 保存编辑版本请求
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveVersionRequest {
+    pub icon_id: String,
+    pub image: String,
+    #[serde(default)]
+    pub note: String,
 }
 
 /// 配置项

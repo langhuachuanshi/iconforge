@@ -18,7 +18,13 @@ const router = createRouter({
       path: '/edit',
       name: 'edit',
       component: () => import('../views/EditView.vue'),
-      meta: { title: '编辑导出' },
+      meta: { title: '编辑图标' },
+    },
+    {
+      path: '/export',
+      name: 'export',
+      component: () => import('../views/ExportView.vue'),
+      meta: { title: '导出图标' },
     },
     {
       path: '/history',
@@ -31,12 +37,6 @@ const router = createRouter({
       name: 'extract',
       component: () => import('../views/ExtractView.vue'),
       meta: { title: '图标提取' },
-    },
-    {
-      path: '/image2ico',
-      name: 'image2ico',
-      component: () => import('../views/Image2IcoView.vue'),
-      meta: { title: '图片转 ICO' },
     },
     {
       path: '/settings',

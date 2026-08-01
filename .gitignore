@@ -16,7 +16,7 @@ backend/models/
 
 # Node
 node_modules/
-frontend/dist/
+dist/
 
 # Makefile 运行时（pid/log）
 .run/

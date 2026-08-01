@@ -68,6 +68,15 @@ export interface IconMeta {
   provider: string
 }
 
+/** 图标编辑版本（工程文件存档点） */
+export interface VersionMeta {
+  id: string
+  iconId: string
+  versionNo: number
+  createdAt: string
+  note: string
+}
+
 // ---------- Tauri invoke 命令 ----------
 
 export async function getProviders(): Promise<ProviderInfo[]> {
@@ -126,6 +135,60 @@ export async function removeColor(
   }
 }
 
+/** 边缘净化：op=erode(收缩)/feather(羽化)/decontaminate(去色晕)/stroke(内描边) */
+export async function edgeRefine(
+  image: string,
+  op: 'erode' | 'feather' | 'decontaminate' | 'stroke',
+  amount: number,
+  color?: [number, number, number],
+): Promise<string> {
+  const result = await invoke<{ image: string }>('edge_refine', {
+    req: { image, op, amount, color: color ?? [0, 0, 0] },
+  })
+  return result.image
+}
+
+/** 智能裁剪：传 ratioW/ratioH 走按宽高比裁剪；都不传走 trim(去透明边距) */
+export async function smartCrop(
+  image: string,
+  options: { threshold?: number; ratioW?: number; ratioH?: number } = {},
+): Promise<string> {
+  const result = await invoke<{ image: string }>('smart_crop', {
+    req: {
+      image,
+      threshold: options.threshold ?? 0,
+      ratioW: options.ratioW ?? 0,
+      ratioH: options.ratioH ?? 0,
+    },
+  })
+  return result.image
+}
+
+/** 形状遮罩：shape=rounded(圆角矩形,带radius)/circle(圆形) */
+export async function applyShapeMask(
+  image: string,
+  shape: 'rounded' | 'circle',
+  radius = 0,
+): Promise<string> {
+  const result = await invoke<{ image: string }>('apply_shape_mask', {
+    req: { image, shape, radius },
+  })
+  return result.image
+}
+
+/** 调色：brightness/contrast/saturation 各 -100~100，0 为不变 */
+export async function adjustColor(
+  image: string,
+  brightness: number,
+  contrast: number,
+  saturation: number,
+): Promise<string> {
+  const result = await invoke<{ image: string }>('adjust_color', {
+    req: { image, brightness, contrast, saturation },
+  })
+  return result.image
+}
+
 /**
  * 导出图标：弹出保存对话框，Rust 后端直接写入用户选定的文件路径
  */
@@ -168,6 +231,29 @@ export async function fetchIconBase64(iconId: string): Promise<string> {
 /** 获取图标文件路径，用于 convertFileSrc */
 export async function getIconPath(iconId: string): Promise<string> {
   return invoke('get_icon_path', { iconId })
+}
+
+// ---------- 图标编辑版本（工程文件存档点）----------
+
+/** 保存当前编辑状态为该图标的新版本（存档点） */
+export async function saveIconVersion(iconId: string, image: string, note = ''): Promise<VersionMeta> {
+  return invoke('save_icon_version', { req: { iconId, image, note } })
+}
+
+/** 列出某图标所有编辑版本（最新在前） */
+export async function listIconVersions(iconId: string): Promise<VersionMeta[]> {
+  return invoke('list_icon_versions', { iconId })
+}
+
+/** 按 versionId 加载某版本的图（回溯历史版本继续编辑） */
+export async function loadIconVersion(versionId: string): Promise<string> {
+  const result = await invoke<{ image: string }>('load_icon_version', { versionId })
+  return result.image
+}
+
+/** 删除某编辑版本 */
+export async function deleteIconVersion(versionId: string): Promise<void> {
+  await invoke('delete_icon_version', { versionId })
 }
 
 /** 读取所有配置 */

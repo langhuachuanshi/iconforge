@@ -104,7 +104,7 @@ function goEdit() {
       <div class="canvas-area" v-loading="generating" element-loading-text="AI 正在创作...">
         <div class="canvas-inner checkerboard" v-if="generatedImage">
           <img :src="toDataUrl(generatedImage)" class="preview-img" alt="生成的图标" />
-          <el-button type="primary" @click="goEdit" style="margin-top:16px">去编辑导出 →</el-button>
+          <el-button type="primary" @click="goEdit" style="margin-top:16px">去编辑 →</el-button>
         </div>
         <el-empty v-else description="图标将显示在这里" :image-size="120" />
       </div>

@@ -53,15 +53,15 @@ appWindow.onResized(async () => {
           </el-menu-item>
           <el-menu-item index="/edit">
             <el-icon><Crop /></el-icon>
-            <span>编辑导出</span>
+            <span>编辑图标</span>
+          </el-menu-item>
+          <el-menu-item index="/export">
+            <el-icon><Download /></el-icon>
+            <span>导出图标</span>
           </el-menu-item>
           <el-menu-item index="/extract">
             <el-icon><CopyDocument /></el-icon>
             <span>图标提取</span>
-          </el-menu-item>
-          <el-menu-item index="/image2ico">
-            <el-icon><Files /></el-icon>
-            <span>图片转 ICO</span>
           </el-menu-item>
           <el-menu-item index="/history">
             <el-icon><Clock /></el-icon>
@@ -75,7 +75,11 @@ appWindow.onResized(async () => {
       </el-aside>
 
       <el-main>
-        <router-view />
+        <router-view v-slot="{ Component }">
+          <keep-alive>
+            <component :is="Component" />
+          </keep-alive>
+        </router-view>
       </el-main>
     </el-container>
   </div>

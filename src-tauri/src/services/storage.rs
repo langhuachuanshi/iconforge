@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use uuid::Uuid;
 
 use crate::error::AppError;
-use crate::models::IconMeta;
+use crate::models::{IconMeta, VersionMeta};
 
 const INIT_SQL: &str = "
 CREATE TABLE IF NOT EXISTS icons (
@@ -40,6 +40,17 @@ CREATE TABLE IF NOT EXISTS providers (
     sort_order  INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS icon_versions (
+    id          TEXT PRIMARY KEY,
+    icon_id     TEXT NOT NULL,
+    version_no  INTEGER NOT NULL,
+    created_at  TEXT NOT NULL,
+    filename    TEXT NOT NULL,
+    note        TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_versions_icon ON icon_versions(icon_id, version_no);
 ";
 
 const MIGRATE_SQL: &str = "
@@ -198,6 +209,152 @@ impl Storage {
         conn.execute("DELETE FROM icons WHERE id = ?1", rusqlite::params![icon_id])?;
 
         Ok(true)
+    }
+
+    // ── 图标编辑版本（工程文件存档点）──
+    // 每个图标可存多个编辑版本（手动保存时落盘），上限 MAX_VERSIONS_PER_ICON。
+    // 版本 PNG 存 base_dir/icon_versions/ 子目录，与原图 {id}.png 分开。
+
+    const MAX_VERSIONS_PER_ICON: usize = 10;
+
+    /// 版本文件目录（懒创建）
+    fn versions_dir(&self) -> PathBuf {
+        let d = self.base_dir.join("icon_versions");
+        if !d.exists() { let _ = fs::create_dir_all(&d); }
+        d
+    }
+
+    /// 保存一个新版本：写 PNG + 插 DB，超上限时淘汰最早的（连文件）
+    pub fn save_version(
+        &self,
+        icon_id: &str,
+        image_bytes: &[u8],
+        note: &str,
+    ) -> Result<VersionMeta, AppError> {
+        let dir = self.versions_dir();
+        let conn = self.conn.lock();
+
+        // 当前最大版本号 + 1
+        let next_no: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version_no), 0) + 1 FROM icon_versions WHERE icon_id = ?1",
+                rusqlite::params![icon_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(1);
+
+        let version_id = Uuid::new_v4().simple().to_string()[..12].to_string();
+        let created_at = Utc::now().to_rfc3339();
+        let filename = format!("{}_v{}.png", icon_id, next_no);
+        let file_path = dir.join(&filename);
+        fs::write(&file_path, image_bytes)?;
+
+        conn.execute(
+            "INSERT INTO icon_versions (id, icon_id, version_no, created_at, filename, note) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![version_id, icon_id, next_no, created_at, filename, note],
+        )?;
+
+        // 淘汰超额的最早版本
+        let overflow: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM icon_versions WHERE icon_id = ?1",
+            rusqlite::params![icon_id], |row| row.get(0),
+        ).unwrap_or(0);
+        if overflow > Self::MAX_VERSIONS_PER_ICON as i64 {
+            // 取最早的版本文件名并删文件
+            let old_file: Option<String> = conn.query_row(
+                "SELECT filename FROM icon_versions WHERE icon_id = ?1 ORDER BY version_no ASC LIMIT 1",
+                rusqlite::params![icon_id], |row| row.get(0),
+            ).optional().ok().flatten();
+            if let Some(f) = old_file {
+                let p = dir.join(&f);
+                if p.exists() { let _ = fs::remove_file(&p); }
+            }
+            conn.execute(
+                "DELETE FROM icon_versions WHERE id = (
+                    SELECT id FROM icon_versions WHERE icon_id = ?1 ORDER BY version_no ASC LIMIT 1
+                )",
+                rusqlite::params![icon_id],
+            )?;
+        }
+
+        Ok(VersionMeta {
+            id: version_id,
+            icon_id: icon_id.to_string(),
+            version_no: next_no,
+            created_at,
+            note: note.to_string(),
+        })
+    }
+
+    /// 列出某图标所有版本（最新在前）
+    pub fn list_versions(&self, icon_id: &str) -> Result<Vec<VersionMeta>, AppError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, icon_id, version_no, created_at, note FROM icon_versions WHERE icon_id = ?1 ORDER BY version_no DESC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![icon_id], |row| {
+            Ok(VersionMeta {
+                id: row.get(0)?,
+                icon_id: row.get(1)?,
+                version_no: row.get(2)?,
+                created_at: row.get(3)?,
+                note: row.get(4)?,
+            })
+        })?;
+        let mut v = Vec::new();
+        for r in rows { v.push(r?); }
+        Ok(v)
+    }
+
+    /// 取某版本最新一条的文件字节（用于"载入最新版本"）
+    pub fn latest_version_bytes(&self, icon_id: &str) -> Result<Option<Vec<u8>>, AppError> {
+        let conn = self.conn.lock();
+        let filename: Option<String> = conn.query_row(
+            "SELECT filename FROM icon_versions WHERE icon_id = ?1 ORDER BY version_no DESC LIMIT 1",
+            rusqlite::params![icon_id], |row| row.get(0),
+        ).optional().ok().flatten();
+        drop(conn);
+        match filename {
+            Some(f) => {
+                let p = self.versions_dir().join(&f);
+                if p.exists() { Ok(Some(fs::read(&p)?)) } else { Ok(None) }
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// 按 version_id 加载版本文件字节
+    pub fn version_bytes_by_id(&self, version_id: &str) -> Result<Option<Vec<u8>>, AppError> {
+        let conn = self.conn.lock();
+        let filename: Option<String> = conn.query_row(
+            "SELECT filename FROM icon_versions WHERE id = ?1",
+            rusqlite::params![version_id], |row| row.get(0),
+        ).optional().ok().flatten();
+        drop(conn);
+        match filename {
+            Some(f) => {
+                let p = self.versions_dir().join(&f);
+                if p.exists() { Ok(Some(fs::read(&p)?)) } else { Ok(None) }
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// 删除某版本（文件 + DB 行）
+    pub fn delete_version(&self, version_id: &str) -> Result<bool, AppError> {
+        let conn = self.conn.lock();
+        let filename: Option<String> = conn.query_row(
+            "SELECT filename FROM icon_versions WHERE id = ?1",
+            rusqlite::params![version_id], |row| row.get(0),
+        ).optional().ok().flatten();
+        if let Some(f) = filename {
+            let p = self.versions_dir().join(&f);
+            if p.exists() { let _ = fs::remove_file(&p); }
+            conn.execute("DELETE FROM icon_versions WHERE id = ?1", rusqlite::params![version_id])?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// 获取配置值
@@ -361,5 +518,89 @@ impl<T> OptionalExt<T> for Result<T, rusqlite::Error> {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn open_test_storage() -> (TempDir, Storage) {
+        let dir = TempDir::new().unwrap();
+        let storage = Storage::new(dir.path().to_path_buf()).unwrap();
+        (dir, storage)
+    }
+
+    fn fake_png() -> Vec<u8> {
+        // 最小 PNG 字节（1x1 透明），只为写文件用
+        vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+    }
+
+    #[test]
+    fn test_save_and_list_versions() {
+        let (_dir, storage) = open_test_storage();
+        // 先建一个 icon 记录（外键约束不强制，但语义上需要）
+        storage.save_icon(&fake_png(), "test", "", "tongyi").unwrap();
+        let icon_id = storage.list_icons(10, 0).unwrap()[0].id.clone();
+
+        // 存 3 个版本
+        for i in 0..3 {
+            storage.save_version(&icon_id, &fake_png(), &format!("edit {i}")).unwrap();
+        }
+        let versions = storage.list_versions(&icon_id).unwrap();
+        assert_eq!(versions.len(), 3);
+        // 最新在前：version_no 倒序
+        assert_eq!(versions[0].version_no, 3);
+        assert_eq!(versions[2].version_no, 1);
+    }
+
+    #[test]
+    fn test_latest_version_bytes() {
+        let (_dir, storage) = open_test_storage();
+        storage.save_icon(&fake_png(), "test", "", "").unwrap();
+        let icon_id = storage.list_icons(10, 0).unwrap()[0].id.clone();
+
+        // 无版本时返回 None
+        assert!(storage.latest_version_bytes(&icon_id).unwrap().is_none());
+
+        // 存一个版本，内容为特定字节
+        let payload = vec![1u8, 2, 3, 4];
+        storage.save_version(&icon_id, &payload, "").unwrap();
+        let bytes = storage.latest_version_bytes(&icon_id).unwrap().unwrap();
+        assert_eq!(bytes, payload);
+    }
+
+    #[test]
+    fn test_version_limit_eviction() {
+        let (_dir, storage) = open_test_storage();
+        storage.save_icon(&fake_png(), "test", "", "").unwrap();
+        let icon_id = storage.list_icons(10, 0).unwrap()[0].id.clone();
+
+        // 存超过上限（10）个版本
+        for i in 0..(Storage::MAX_VERSIONS_PER_ICON + 3) {
+            storage.save_version(&icon_id, &fake_png(), &format!("v{i}")).unwrap();
+        }
+        let versions = storage.list_versions(&icon_id).unwrap();
+        // 不应超过上限
+        assert_eq!(versions.len(), Storage::MAX_VERSIONS_PER_ICON);
+        // 最早的被淘汰：version_no 应从 4 开始（1,2,3 被删），最新的仍在
+        let min_no = versions.iter().map(|v| v.version_no).min().unwrap();
+        let max_no = versions.iter().map(|v| v.version_no).max().unwrap();
+        assert_eq!(min_no, 4, "最早的版本应被淘汰");
+        assert_eq!(max_no, (Storage::MAX_VERSIONS_PER_ICON + 3) as i64);
+    }
+
+    #[test]
+    fn test_delete_version() {
+        let (_dir, storage) = open_test_storage();
+        storage.save_icon(&fake_png(), "test", "", "").unwrap();
+        let icon_id = storage.list_icons(10, 0).unwrap()[0].id.clone();
+        let meta = storage.save_version(&icon_id, &fake_png(), "").unwrap();
+
+        assert!(storage.delete_version(&meta.id).unwrap());
+        // 再删返回 false
+        assert!(!storage.delete_version(&meta.id).unwrap());
+        assert!(storage.list_versions(&icon_id).unwrap().is_empty());
     }
 }

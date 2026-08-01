@@ -22,6 +22,7 @@ import {
 } from '../api/client'
 
 const providers = ref<ProviderEntry[]>([])
+const appVersion = ref('')
 const loading = ref(false)
 
 // 抠图设置
@@ -60,6 +61,11 @@ const rules: FormRules = {
 onMounted(async () => {
   await load()
   await loadBgSettings()
+  // 读应用版本号（来自 tauri.conf.json，不硬编码）
+  try {
+    const { getVersion } = await import('@tauri-apps/api/app')
+    appVersion.value = await getVersion()
+  } catch { appVersion.value = '' }
 })
 
 async function load() {
@@ -204,6 +210,14 @@ async function handleToggle(row: ProviderEntry) {
     row.enabled = !row.enabled
   } catch (e: any) {
     ElMessage.error(e?.message || '操作失败')
+  }
+}
+
+async function openDoc(url: string) {
+  try {
+    await openUrl(url)
+  } catch (e: any) {
+    ElMessage.error('打开文档失败：' + (e?.message || e))
   }
 }
 
@@ -427,10 +441,38 @@ async function openLocation(id: string) {
       </el-tab-pane>
 
       <el-tab-pane label="关于" lazy>
-        <el-card>
-          <p>IconForge — AI 图标生成桌面应用</p>
-          <p>Tauri 2.x + Vue 3 + Element Plus</p>
-        </el-card>
+        <div class="about-page">
+          <img src="/icon.png" class="about-logo" alt="IconForge" />
+          <h2 class="about-name">IconForge</h2>
+          <p v-if="appVersion" class="about-version">版本 {{ appVersion }}</p>
+          <p class="about-desc">AI 图标生成与编辑桌面应用</p>
+
+          <el-divider />
+
+          <dl class="about-info">
+            <div class="info-row">
+              <dt>作者</dt>
+              <dd>Silas</dd>
+            </div>
+            <div class="info-row">
+              <dt>工作室</dt>
+              <dd>奥哈悠工作室</dd>
+            </div>
+            <div class="info-row">
+              <dt>邮箱</dt>
+              <dd>
+                <el-link type="primary" :underline="false" @click="openUrl('mailto:silas@890625.com')">
+                  silas@890625.com
+                </el-link>
+              </dd>
+            </div>
+          </dl>
+
+          <el-divider />
+
+          <p class="about-tech">Tauri 2.x · Vue 3 · Element Plus</p>
+          <p class="about-copy">Copyright © 2026 奥哈悠工作室（Silas）</p>
+        </div>
       </el-tab-pane>
     </el-tabs>
 
@@ -476,7 +518,7 @@ async function openLocation(id: string) {
     >
       <p class="tool-desc">
         阿里云视觉智能 VIAPI，约 0.002 元/次。需 RAM 用户并授予 AliyunVIAPIFullAccess 权限。
-        <el-link type="primary" :underline="false" @click.prevent="openUrl('https://help.aliyun.com/zh/viapi/developer-reference/api-k8cs8t')">查看文档</el-link>
+        <el-link type="primary" :underline="false" @click.prevent="openDoc('https://help.aliyun.com/zh/viapi/developer-reference/api-k8cs8t')">查看文档</el-link>
       </p>
       <el-form label-position="top">
         <el-form-item label="AccessKey ID">
@@ -603,4 +645,17 @@ async function openLocation(id: string) {
 
 /* 弹窗内说明文字 */
 .tool-desc { font-size: 12px; color: var(--el-text-color-secondary); margin: 6px 0; line-height: 1.5; }
+
+/* 关于页 */
+.about-page { max-width: 420px; margin: 0 auto; text-align: center; padding: 24px 0; }
+.about-logo { width: 96px; height: 96px; margin-bottom: 12px; }
+.about-name { margin: 0; font-size: 24px; }
+.about-version { margin: 4px 0 0; color: var(--el-text-color-secondary); font-size: 13px; }
+.about-desc { margin: 8px 0 0; color: var(--el-text-color-regular); }
+.about-info { margin: 0; text-align: left; }
+.about-info .info-row { display: flex; align-items: center; padding: 6px 0; }
+.about-info dt { width: 70px; color: var(--el-text-color-secondary); font-size: 13px; flex-shrink: 0; }
+.about-info dd { margin: 0; font-size: 14px; }
+.about-tech { color: var(--el-text-color-secondary); font-size: 12px; margin: 0; }
+.about-copy { color: var(--el-text-color-placeholder); font-size: 12px; margin: 8px 0 0; }
 </style>

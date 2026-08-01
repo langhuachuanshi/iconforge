@@ -1,19 +1,27 @@
-//! 阿里云 OpenAPI RPC V2 签名（HMAC-SHA1）
+//! 阿里云 OpenAPI V3 签名（ACS3-HMAC-SHA256）
 //!
-//! 参考：https://help.aliyun.com/zh/sdk/product-overview/rpc-mechanism
-//! 算法：Signature = Base64(HMAC-SHA1(AccessKeySecret + "&", StringToSign))
-//! StringToSign = HTTPMethod + "&" + percentEncode("/") + "&" + percentEncode(CanonicalizedQueryString)
+//! 参考：https://www.alibabacloud.com/help/en/sdk/product-overview/v3-request-structure-and-signature
+//! 算法：
+//!   CanonicalRequest = METHOD + \n + "/" + \n + CanonicalQueryString + \n
+//!                      + CanonicalHeaders + \n + SignedHeaders + \n + hex(SHA256(body))
+//!   StringToSign = "ACS3-HMAC-SHA256" + \n + hex(SHA256(CanonicalRequest))
+//!   Signature = lowercase_hex(HMAC-SHA256(AccessKeySecret, StringToSign))
+//!   Authorization = ACS3-HMAC-SHA256 Credential={AK},SignedHeaders={...},Signature={sig}
+//!
+//! RPC 风格接口：参数走 query string，URI 固定 "/"，body 为空。
 
-use base64::Engine;
 use hmac::{Hmac, Mac};
-use sha1::Sha1;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use sha2::{Digest, Sha256};
 
-type HmacSha1 = Hmac<Sha1>;
+use crate::error::AppError;
 
-/// RFC 3986 percent-encode，规则：
+type HmacSha256 = Hmac<Sha256>;
+
+/// RFC 3986 percent-encode（V3 query 编码用）：
 /// - A-Z a-z 0-9 - _ . ~ 不编码
 /// - 其他字符编码为 %XY（大写十六进制）
-/// - 空格 → %20（不是 +），* → %2A，~ 保留
+/// - 空格 → %20（不是 +），* → %2A
 pub fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.as_bytes() {
@@ -30,49 +38,124 @@ pub fn percent_encode(s: &str) -> String {
     out
 }
 
-/// 对一组请求参数计算 RPC V2 签名。
+/// 构造一个带 V3 签名的 RPC 请求。
 ///
-/// `params` 不含 Signature 本身，含所有公共参数 + 业务参数。
-/// `method` 通常为 "GET" 或 "POST"。
-/// 返回的签名值需再做一次 percent_encode 后作为 Signature 参数。
-pub fn sign(params: &[(String, String)], method: &str, access_key_secret: &str) -> String {
-    // 1. 按参数名字典序排序（值不参与排序键，但同 key 时顺序按输入——阿里云要求按 key 排序）
-    let mut sorted: Vec<&(String, String)> = params.iter().collect();
-    sorted.sort_by(|a, b| a.0.cmp(&b.0));
-
-    // 2. 拼接 CanonicalizedQueryString：k1=v1&k2=v2...（k/v 都做 percent_encode）
-    let canonical: String = sorted
+/// 参数走 query string（RPC 风格），URI 固定 "/"，body 为空。
+/// 返回 (HeaderMap, 完整 URL)。调用方用 `client.method(url).headers(headers).send()`。
+///
+/// - `host`：如 "imageseg.cn-shanghai.aliyuncs.com"（不带协议）
+/// - `method`：GET / POST
+/// - `params`：业务参数（不含公共参数，本函数自动加 RegionId 等不需，公共项由 header 承担）
+/// - `security_token`：STS 临时凭证时传 Some，长期 AK 传 None
+pub fn build_v3_request(
+    host: &str,
+    method: &str,
+    action: &str,
+    version: &str,
+    params: &[(&str, String)],
+    ak: &str,
+    sk: &str,
+    security_token: Option<&str>,
+) -> Result<(HeaderMap, String), AppError> {
+    // ── 1. CanonicalQueryString：参数名字典序，RFC3986 编码 ──
+    let mut sorted: Vec<(&str, String)> = params.iter().map(|(k, v)| (*k, v.clone())).collect();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+    let canonical_query = sorted
         .iter()
         .map(|(k, v)| format!("{}={}", percent_encode(k), percent_encode(v)))
         .collect::<Vec<_>>()
         .join("&");
 
-    // 3. 构造 StringToSign
-    let string_to_sign = format!(
-        "{}&{}&{}",
-        method,
-        percent_encode("/"),
-        percent_encode(&canonical)
+    // ── 2. 组装要参与签名的 header（host + x-acs-* ） ──
+    // body 为空，x-acs-content-sha256 = SHA256("") 固定值
+    let empty_hash = hex_sha256(b"");
+    let now_iso8601 = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let nonce = uuid::Uuid::new_v4().to_string();
+
+    // 参与签名的 header（小写 key），按 key 字典序排列
+    // 必含：host / x-acs-action / x-acs-version / x-acs-date / x-acs-signature-nonce / x-acs-content-sha256
+    // STS 时加 x-acs-security-token
+    let mut signed_headers_vec: Vec<(&str, String)> = vec![
+        ("host", host.to_string()),
+        ("x-acs-action", action.to_string()),
+        ("x-acs-version", version.to_string()),
+        ("x-acs-date", now_iso8601.clone()),
+        ("x-acs-signature-nonce", nonce.clone()),
+        ("x-acs-content-sha256", empty_hash.clone()),
+    ];
+    if let Some(tok) = security_token {
+        signed_headers_vec.push(("x-acs-security-token", tok.to_string()));
+    }
+    // 按 header key 字典序（已是基本有序，这里确保 STS 插入后仍有序）
+    signed_headers_vec.sort_by(|a, b| a.0.cmp(b.0));
+
+    // 每个 header 末尾都要 \n（含最后一个），V3 规范要求
+    let canonical_headers = signed_headers_vec
+        .iter()
+        .map(|(k, v)| format!("{k}:{v}\n"))
+        .collect::<Vec<_>>()
+        .join("");
+    let signed_headers = signed_headers_vec
+        .iter()
+        .map(|(k, _)| *k)
+        .collect::<Vec<_>>()
+        .join(";");
+
+    // ── 3. CanonicalRequest ──
+    let canonical_request = format!(
+        "{method}\n/\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{empty_hash}",
+    );
+    // 签名诊断：打印 CanonicalRequest，便于和服务端报错里的对比
+    log::info!("[Aliyun V3] CanonicalRequest:\n{}", canonical_request);
+
+    // ── 4. StringToSign ──
+    let hashed_canonical = hex_sha256(canonical_request.as_bytes());
+    let string_to_sign = format!("ACS3-HMAC-SHA256\n{hashed_canonical}");
+    log::info!("[Aliyun V3] StringToSign:\n{}", string_to_sign);
+
+    // ── 5. Signature（密钥=裸 AccessKeySecret）──
+    let mut mac = HmacSha256::new_from_slice(sk.as_bytes())
+        .map_err(|e| AppError::ProviderError(format!("HMAC 初始化失败: {e}")))?;
+    mac.update(string_to_sign.as_bytes());
+    let signature = hex::encode(mac.finalize().into_bytes());
+
+    // ── 6. 组装 HeaderMap ──
+    let authorization = format!(
+        "ACS3-HMAC-SHA256 Credential={ak},SignedHeaders={signed_headers},Signature={signature}"
     );
 
-    // 4. HMAC-SHA1，密钥 = AccessKeySecret + "&"
-    let key = format!("{}&", access_key_secret);
-    let mut mac = HmacSha1::new_from_slice(key.as_bytes()).expect("HMAC key 长度任意");
-    mac.update(string_to_sign.as_bytes());
-    let raw = mac.finalize().into_bytes();
+    let mut headers = HeaderMap::new();
+    headers.insert("host", HeaderValue::from_str(host).map_err(|e| AppError::ProviderError(format!("host header: {e}")))?);
+    headers.insert(HeaderName::from_static("x-acs-action"), HeaderValue::from_str(action).map_err(|e| AppError::ProviderError(format!("action header: {e}")))?);
+    headers.insert(HeaderName::from_static("x-acs-version"), HeaderValue::from_str(version).map_err(|e| AppError::ProviderError(format!("version header: {e}")))?);
+    headers.insert(HeaderName::from_static("x-acs-date"), HeaderValue::from_str(&now_iso8601).map_err(|e| AppError::ProviderError(format!("date header: {e}")))?);
+    headers.insert(HeaderName::from_static("x-acs-signature-nonce"), HeaderValue::from_str(&nonce).map_err(|e| AppError::ProviderError(format!("nonce header: {e}")))?);
+    headers.insert(HeaderName::from_static("x-acs-content-sha256"), HeaderValue::from_str(&empty_hash).map_err(|e| AppError::ProviderError(format!("content-sha256 header: {e}")))?);
+    headers.insert("authorization", HeaderValue::from_str(&authorization).map_err(|e| AppError::ProviderError(format!("authorization header: {e}")))?);
+    if let Some(tok) = security_token {
+        headers.insert(HeaderName::from_static("x-acs-security-token"), HeaderValue::from_str(tok).map_err(|e| AppError::ProviderError(format!("security-token header: {e}")))?);
+    }
 
-    // 5. Base64
-    base64::engine::general_purpose::STANDARD.encode(raw)
+    let url = if canonical_query.is_empty() {
+        format!("https://{host}/")
+    } else {
+        format!("https://{host}/?{canonical_query}")
+    };
+
+    Ok((headers, url))
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 阿里云官方文档测试向量：
-    /// AccessKeyId=testid, AccessKeySecret=testsecret
-    /// 调用 DescribeInstances，期望签名 = eCtOh4iJJ4tDhW6tfZ4vyTkm7qQ=
-    /// （文档中给的是 nq6Q8I8VGyK9VQrn/FM747oe**** 这种带星号截断的，下面用完整可复现向量）
+    /// RFC 3986 编码规则（V2/V3 通用）
     #[test]
     fn test_percent_encode_basic() {
         assert_eq!(percent_encode("hello"), "hello");
@@ -84,27 +167,12 @@ mod tests {
         assert_eq!(percent_encode("&"), "%26");
     }
 
+    /// 空 body 的 SHA256 固定值（V3 签名里 x-acs-content-sha256 用到）
     #[test]
-    fn test_sign_official_vector() {
-        // 阿里云文档标准示例：调用 ECS DescribeInstances
-        // 公共参数 + 业务参数（ZoneId=cn-beijing-a）
-        // Timestamp: 2016-02-23T12:46:24Z
-        // SignatureNonce: 4808ae57-011e-42c1-9c3c-d9aa272b
-        //
-        // 注：阿里云文档给出的示例签名值是截断+星号占位的（nq6Q8I8VGyK9VQrn/FM747oe****），
-        // 无法直接对照。此处用 Node 独立参考实现（crypto.createHmac）交叉验证得到的确定值。
-        let params = vec![
-            ("Action".into(), "DescribeInstances".into()),
-            ("AccessKeyId".into(), "testid".into()),
-            ("Format".into(), "JSON".into()),
-            ("SignatureMethod".into(), "HMAC-SHA1".into()),
-            ("SignatureNonce".into(), "4808ae57-011e-42c1-9c3c-d9aa272b".into()),
-            ("SignatureVersion".into(), "1.0".into()),
-            ("Timestamp".into(), "2016-02-23T12:46:24Z".into()),
-            ("Version".into(), "2014-05-26".into()),
-            ("ZoneId".into(), "cn-beijing-a".into()),
-        ];
-        let sig = sign(&params, "GET", "testsecret");
-        assert_eq!(sig, "ll4H42fp/3oazFDIUenbgUcLQV8=");
+    fn test_empty_body_hash() {
+        assert_eq!(
+            hex_sha256(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 }

@@ -1,18 +1,22 @@
 <script setup lang="ts">
-import { computed, ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { computed, ref, watch, nextTick, onMounted, onActivated, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   cropImage,
-  exportIcon,
   removeBackground,
   removeBackgroundCloud,
   removeColor,
+  edgeRefine,
+  smartCrop,
+  applyShapeMask,
+  adjustColor,
   downloadBgModel,
   listBgModels,
   getConfig,
   setConfig,
   savePng,
+  saveIconVersion,
   toDataUrl,
   blobToBase64,
   type BgModelEntry,
@@ -78,12 +82,16 @@ function redo() {
 // ── 缩放/拖拽 ──
 function fitToCanvas() {
   const rect = canvasRef.value?.getBoundingClientRect()
-  if (!rect || !imgNatural.value.w) return
+  // 画布 DOM 尚未布局好（刚从生成页跳来、或 v-else 刚渲染）时 rect 会偏小甚至为 0，
+  // 此时算出的 scale 为负或 0（表现为 -4%）。防御：rect 太小则跳过，等下次调用。
+  if (!rect || !imgNatural.value.w || rect.width < 80 || rect.height < 80) return
   const sx = (rect.width - 40) / imgNatural.value.w
   const sy = (rect.height - 40) / imgNatural.value.h
-  scale.value = Math.min(sx, sy, 1)
-  panX.value = (rect.width - imgNatural.value.w * scale.value) / 2
-  panY.value = (rect.height - imgNatural.value.h * scale.value) / 2
+  const s = Math.min(sx, sy, 1)
+  if (!(s > 0)) return // scale 非正数则不赋值
+  scale.value = s
+  panX.value = (rect.width - imgNatural.value.w * s) / 2
+  panY.value = (rect.height - imgNatural.value.h * s) / 2
 }
 
 function onCanvasWheel(e: WheelEvent) {
@@ -100,9 +108,37 @@ function onCanvasWheel(e: WheelEvent) {
 function onCanvasMouseDown(e: MouseEvent) {
   if (e.button !== 0) return
   if (touchupActive.value) return // 触摸画布自己处理
+  // 去底色模式：点击画布拾取像素颜色（吸管）
+  if (colorActive.value) {
+    pickColorAt(e.clientX, e.clientY)
+    return
+  }
   // 裁剪模式下直接拖拽平移图片（取景框固定不动）
   isPanning.value = true
   panStart.value = { x: e.clientX, y: e.clientY, px: panX.value, py: panY.value }
+}
+
+/** 吸管：屏幕坐标 → 图像像素 → 取该像素颜色，写入 bgColor */
+function pickColorAt(screenX: number, screenY: number) {
+  if (!image.value || !canvasRef.value) return
+  const rect = canvasRef.value.getBoundingClientRect()
+  // 屏幕坐标 → 图像坐标（与裁剪 confirmCrop 同一套换算）
+  const imgX = Math.round((screenX - rect.left - panX.value) / scale.value)
+  const imgY = Math.round((screenY - rect.top - panY.value) / scale.value)
+  if (imgX < 0 || imgY < 0 || imgX >= imgNatural.value.w || imgY >= imgNatural.value.h) return
+  // 用隐藏 canvas 取像素
+  const c = document.createElement('canvas')
+  c.width = imgNatural.value.w
+  c.height = imgNatural.value.h
+  const ctx = c.getContext('2d')!
+  const img = new Image()
+  img.onload = () => {
+    ctx.drawImage(img, 0, 0)
+    const p = ctx.getImageData(imgX, imgY, 1, 1).data
+    const hex = '#' + [p[0], p[1], p[2]].map((v) => v.toString(16).padStart(2, '0')).join('')
+    bgColor.value = hex
+  }
+  img.src = toDataUrl(image.value)
 }
 
 function onCanvasMouseMove(e: MouseEvent) {
@@ -116,8 +152,76 @@ function onCanvasMouseUp() {
   isPanning.value = false
 }
 
+// ── 工具状态机（统一管理所有工具的激活状态，PS 风格）──
+type ToolId = 'crop' | 'removeColor' | 'removeBg' | 'touchup' | 'smartCrop' | 'edgeRefine' | 'shapeMask' | 'adjustColor'
+const activeTool = ref<ToolId | null>(null)
+
+// 左侧工具栏列表（顺序 = 显示顺序）
+// 工具按工作流分组：抠图 → 裁剪 → 调整装饰
+const toolGroups: { label: string; items: { id: ToolId; name: string; icon: string }[] }[] = [
+  {
+    label: '抠图',
+    items: [
+      { id: 'removeBg', name: '智能抠图', icon: 'MagicStick' },
+      { id: 'removeColor', name: '去底色', icon: 'Aim' },
+      { id: 'touchup', name: '手动修补', icon: 'Brush' },
+    ],
+  },
+  {
+    label: '裁剪',
+    items: [
+      { id: 'crop', name: '自由裁剪', icon: 'Crop' },
+      { id: 'smartCrop', name: '智能裁剪', icon: 'ScaleToOriginal' },
+    ],
+  },
+  {
+    label: '调整',
+    items: [
+      { id: 'edgeRefine', name: '边缘净化', icon: 'Filter' },
+      { id: 'shapeMask', name: '形状遮罩', icon: 'PieChart' },
+      { id: 'adjustColor', name: '调色', icon: 'Sunny' },
+    ],
+  },
+]
+
+function toolName(id: ToolId): string {
+  for (const g of toolGroups) {
+    const t = g.items.find((t) => t.id === id)
+    if (t) return t.name
+  }
+  return ''
+}
+
+// 桥接现有布尔：画布 v-if / onKeydown / touchup 等逻辑依赖这些，无需改
+const cropActive = computed(() => activeTool.value === 'crop')
+const colorActive = computed(() => activeTool.value === 'removeColor')
+const touchupActive = computed(() => activeTool.value === 'touchup')
+
+// Drawer 显隐绑定到 activeTool
+const drawerVisible = computed({
+  get: () => activeTool.value !== null,
+  set: (v: boolean) => { if (!v) closeTool() },
+})
+
+function selectTool(tool: ToolId) {
+  if (!image.value) return
+  // 切换前若已有交互工具激活，先清理其画布状态
+  if (activeTool.value && activeTool.value !== tool) {
+    cleanupActiveTool()
+  }
+  activeTool.value = activeTool.value === tool ? null : tool
+}
+
+function closeTool() {
+  cleanupActiveTool()
+  activeTool.value = null
+}
+
+/** 清理当前交互工具的画布状态（仅交互型需要，即时型无状态）。
+ *  交互工具的画布元素靠 v-if 绑定 activeTool，切换时自动卸载，这里无需额外操作。 */
+function cleanupActiveTool() {}
+
 // ── 裁剪（取景框模式：框固定在画布中央，图片在背后缩放/平移） ──
-const cropActive = ref(false)
 const cropSize = ref(0.75) // 裁剪框占画布短边比例 0.3~1.0
 
 // 取景框尺寸（CSS flexbox 自动居中）
@@ -129,10 +233,10 @@ const cropBoxStyle = computed(() => {
 
 function startCrop() {
   if (!image.value) return
-  cropActive.value = true
+  activeTool.value = 'crop'
 }
 
-function cancelCrop() { cropActive.value = false }
+function cancelCrop() { activeTool.value = null }
 
 async function confirmCrop() {
   if (!image.value) return
@@ -152,25 +256,24 @@ async function confirmCrop() {
   const h = Math.min(imgSide, imgNatural.value.h - y)
 
   pushHistory()
-  processing.value = true; cropActive.value = false
+  processing.value = true; activeTool.value = null
   try {
     syncImage(await cropImage({ image: image.value, x, y, width: w, height: h }))
     ElMessage.success('裁剪完成')
   } catch (e: any) { ElMessage.error(`裁剪失败：${e?.message || e}`) } finally { processing.value = false }
 }
 
-// ── 去底色（魔棒/色键）──
-const colorActive = ref(false)
+// ── 去底色（魔棒/色键）──（colorActive 见上方工具状态机 computed）
 const bgColor = ref('#ffffff')
 const colorTolerance = ref(60)
 
 function startRemoveColor() {
   if (!image.value) return
-  colorActive.value = true
+  activeTool.value = 'removeColor'
 }
 
 function cancelRemoveColor() {
-  colorActive.value = false
+  activeTool.value = null
 }
 
 // hex (#rrggbb) → [r,g,b]
@@ -195,12 +298,11 @@ async function applyRemoveColor() {
     ElMessage.error(`去底色失败：${e?.message || e}`)
   } finally {
     processing.value = false
-    colorActive.value = false
+    activeTool.value = null
   }
 }
 
-// ── 手动修补 ──
-const touchupActive = ref(false)
+// ── 手动修补 ──（touchupActive 见上方工具状态机 computed）
 const touchupPainting = ref(false)
 const touchupMode = ref<'erase' | 'restore'>('erase')
 const touchupBrushSize = ref(20)
@@ -208,7 +310,7 @@ const touchupCanvas = ref<HTMLCanvasElement>()
 
 function startTouchup() {
   if (!image.value) return
-  touchupActive.value = true
+  activeTool.value = 'touchup'
   nextTick(() => {
     const tc = touchupCanvas.value; if (!tc) return
     tc.width = imgNatural.value.w; tc.height = imgNatural.value.h
@@ -220,7 +322,7 @@ function startTouchup() {
 }
 
 function cancelTouchup() {
-  touchupActive.value = false
+  activeTool.value = null
 }
 
 async function applyTouchup() {
@@ -230,7 +332,7 @@ async function applyTouchup() {
   processing.value = true
   const dataUrl = touchupCanvas.value.toDataURL('image/png')
   syncImage(dataUrl.split(',')[1])
-  touchupActive.value = false
+  activeTool.value = null
   processing.value = false
   ElMessage.success('修补已应用')
 }
@@ -281,6 +383,16 @@ function syncImage(b64: string) {
 // ── 快捷键 ──
 function onKeydown(e: KeyboardEvent) {
   if (!image.value && !undoStack.value.length) return
+  // 裁剪模式下方向键微调图片位置（取景框固定，移图片改变框内内容）
+  if (cropActive.value && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
+    e.preventDefault()
+    const step = e.shiftKey ? 30 : 5
+    if (e.key === 'ArrowLeft') panX.value += step
+    else if (e.key === 'ArrowRight') panX.value -= step
+    else if (e.key === 'ArrowUp') panY.value += step
+    else if (e.key === 'ArrowDown') panY.value -= step
+    return
+  }
   if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
     e.preventDefault(); undo()
   } else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
@@ -350,6 +462,13 @@ function goToSettings() {
 onMounted(loadBgModels)
 onMounted(loadEngineConfig)
 
+// keep-alive 下每次进入编辑页都重新自适应窗口（图可能换了、或窗口尺寸变了）
+onActivated(() => {
+  if (image.value && imgNatural.value.w) {
+    nextTick(() => requestAnimationFrame(fitToCanvas))
+  }
+})
+
 // ── 初始化 ──
 watch(() => workspace.currentImage, (val) => {
   if (val) {
@@ -357,7 +476,9 @@ watch(() => workspace.currentImage, (val) => {
     const img = new Image()
     img.onload = () => {
       imgNatural.value = { w: img.naturalWidth, h: img.naturalHeight }
-      nextTick(fitToCanvas)
+      // 双层 nextTick + rAF：确保 v-else 编辑区 DOM 完成布局后再算缩放，
+      // 避免刚跳转时 rect 偏小导致 scale 异常（负数/0）。
+      nextTick(() => requestAnimationFrame(fitToCanvas))
     }
     img.src = toDataUrl(val)
   }
@@ -378,6 +499,14 @@ async function openFile(file: File) {
 async function handleSave() {
   if (!image.value) return
   try {
+    // 有 iconId（图来自历史/生成）→ 存为该图标的编辑版本（工程存档）
+    if (workspace.currentIconId) {
+      const meta = await saveIconVersion(workspace.currentIconId, image.value)
+      isDirty.value = false
+      ElMessage.success(`已存为版本 ${meta.versionNo}`)
+      return
+    }
+    // 无 iconId（本地打开的图）→ 弹对话框存单 PNG（原行为）
     const saved = await savePng(image.value, 'icon.png')
     if (!saved) return // 用户取消
     isDirty.value = false
@@ -411,10 +540,19 @@ async function handleRemoveBg() {
     }
     pushHistory()
     processing.value = true
+    // 订阅云端流水线诊断日志，输出到应用 console（F12 可见）
+    const { listen } = await import('@tauri-apps/api/event')
+    const unlisten = await listen<string>('aliyun-log', (e) => {
+      console.log(e.payload)
+    })
+    console.log('%c[云端抠图开始]', 'color:#409eff;font-weight:bold')
     try {
       syncImage(await removeBackgroundCloud(image.value))
       ElMessage.success('云端抠图完成')
-    } catch (e: any) { ElMessage.error(`抠图失败：${e?.message || e}`) } finally { processing.value = false }
+    } catch (e: any) { ElMessage.error(`抠图失败：${e?.message || e}`) } finally {
+      unlisten()
+      processing.value = false
+    }
     return
   }
 
@@ -447,17 +585,89 @@ async function handleRemoveBg() {
   } catch (e: any) { ElMessage.error(`抠图失败：${e?.message || e}`) } finally { processing.value = false }
 }
 
-// ── 导出 ──
-const pngSizes = ref([16, 32, 48, 64, 128, 256, 512])
-const icoSizes = ref([16, 32, 48, 64, 128, 256])
-const pngAll = [16, 32, 48, 64, 128, 256, 512]
-const icoAll = [16, 32, 48, 64, 128, 256]
-
-async function handleExport() {
+// ── 智能裁剪 ──
+async function handleTrim() {
   if (!image.value) return
-  processing.value = true
-  try { await exportIcon(image.value, pngSizes.value, icoSizes.value); ElMessage.success('导出完成') }
-  catch (e: any) { if (e) ElMessage.error(`导出失败：${e?.message || e}`) } finally { processing.value = false }
+  pushHistory(); processing.value = true
+  try { syncImage(await smartCrop(image.value, { threshold: 0 })); ElMessage.success('已去除透明边距') }
+  catch (e: any) { ElMessage.error(`去边距失败：${e?.message || e}`) } finally { processing.value = false }
+}
+
+async function handleCropAspect(w: number, h: number) {
+  if (!image.value) return
+  pushHistory(); processing.value = true
+  try { syncImage(await smartCrop(image.value, { ratioW: w, ratioH: h })); ElMessage.success(`已裁剪为 ${w}:${h}`) }
+  catch (e: any) { ElMessage.error(`裁剪失败：${e?.message || e}`) } finally { processing.value = false }
+}
+
+// ── 边缘净化 ──
+const edgeAmount = ref(2)       // erode/stroke/decontaminate 用（像素）
+const featherAmount = ref(1.5)  // feather 用（sigma）
+const strokeColor = ref('#000000')
+
+async function handleEdgeRefine(op: 'erode' | 'feather' | 'decontaminate' | 'stroke') {
+  if (!image.value) return
+  const amount = op === 'feather' ? featherAmount.value : edgeAmount.value
+  const color = op === 'stroke' ? hexToRgb(strokeColor.value) : undefined
+  pushHistory(); processing.value = true
+  try {
+    syncImage(await edgeRefine(image.value, op, amount, color))
+    const names = { erode: '收缩', feather: '羽化', decontaminate: '去色晕', stroke: '内描边' }
+    ElMessage.success(`${names[op]}完成`)
+  } catch (e: any) { ElMessage.error(`处理失败：${e?.message || e}`) } finally { processing.value = false }
+}
+
+// ── 形状遮罩 ──
+// shapeRatio 用「短边百分比」（0~50），与图片尺寸无关，不同大小图视觉圆角一致
+const shapeRatio = ref(15)
+const shapePreviewShape = ref<'rounded' | 'circle' | null>(null) // 预览中的形状（null=不预览）
+
+// 比例 → 像素半径（按短边算），用于调后端
+const shapeRadiusPx = computed(() => {
+  const shortSide = Math.min(imgNatural.value.w, imgNatural.value.h)
+  return Math.round((shapeRatio.value / 100) * shortSide)
+})
+
+// 圆角预览框样式：跟随图片 transform，border-radius 用缩放后的显示像素
+const shapePreviewStyle = computed(() => {
+  if (!shapePreviewShape.value) return { display: 'none' }
+  const w = imgNatural.value.w
+  const h = imgNatural.value.h
+  const shortSide = Math.min(w, h)
+  // CSS border-radius 用显示像素（natural × scale）
+  const r = (shapeRatio.value / 100) * shortSide * scale.value
+  const radius = shapePreviewShape.value === 'circle'
+    ? '50%'
+    : `${r}px`
+  return {
+    width: `${w * scale.value}px`,
+    height: `${h * scale.value}px`,
+    borderRadius: radius,
+  }
+})
+
+async function handleShapeMask(shape: 'rounded' | 'circle') {
+  if (!image.value) return
+  pushHistory(); processing.value = true
+  shapePreviewShape.value = null // 应用时关预览
+  try {
+    syncImage(await applyShapeMask(image.value, shape, shapeRadiusPx.value))
+    ElMessage.success(shape === 'circle' ? '已应用圆形遮罩' : '已应用圆角遮罩')
+  } catch (e: any) { ElMessage.error(`应用失败：${e?.message || e}`) } finally { processing.value = false }
+}
+
+// ── 调色 ──
+const adjBrightness = ref(0)
+const adjContrast = ref(0)
+const adjSaturation = ref(0)
+
+async function handleAdjustColor() {
+  if (!image.value) return
+  pushHistory(); processing.value = true
+  try {
+    syncImage(await adjustColor(image.value, adjBrightness.value, adjContrast.value, adjSaturation.value))
+    ElMessage.success('调色完成')
+  } catch (e: any) { ElMessage.error(`调色失败：${e?.message || e}`) } finally { processing.value = false }
 }
 
 // ── computed ──
@@ -487,6 +697,7 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
         <el-button size="small" text @click="fitToCanvas">适应窗口</el-button>
         <span class="zoom-label">{{ Math.round(scale * 100) }}%</span>
         <el-button size="small" @click="handleSave" :disabled="!image"><el-icon><Download /></el-icon> 保存</el-button>
+        <el-button size="small" type="primary" @click="router.push('/export')" :disabled="!image">去导出</el-button>
         <el-button size="small" @click="handleClose" :disabled="!image"><el-icon><Close /></el-icon> 关闭</el-button>
       </div>
     </div>
@@ -500,10 +711,28 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
 
     <!-- 编辑区 -->
     <div v-else class="editor-body">
+      <!-- 左侧工具栏（PS 风格竖条） -->
+      <div class="tool-rail">
+        <div v-for="g in toolGroups" :key="g.label" class="tool-group">
+          <div class="tool-group-label">{{ g.label }}</div>
+          <el-tooltip v-for="t in g.items" :key="t.id" :content="t.name" placement="right">
+            <button
+              class="tool-btn"
+              :class="{ active: activeTool === t.id }"
+              :disabled="!image"
+              @click="selectTool(t.id)"
+            >
+              <el-icon :size="20"><component :is="t.icon" /></el-icon>
+            </button>
+          </el-tooltip>
+        </div>
+      </div>
+
       <!-- 画布 -->
       <div
         ref="canvasRef"
         class="canvas"
+        :class="{ 'canvas-eyedropper': colorActive }"
         v-loading="processing"
         @wheel="onCanvasWheel"
         @mousedown="onCanvasMouseDown"
@@ -522,6 +751,11 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
           </div>
         </div>
 
+        <!-- 形状遮罩实时预览（跟随图片 transform，圆角外区域用暗色遮罩，拖滑块实时变化） -->
+        <div v-if="shapePreviewShape" class="shape-preview" :style="{ transform: imageTransform, transformOrigin: '0 0' }">
+          <div class="shape-preview-inner" :style="shapePreviewStyle"></div>
+        </div>
+
         <!-- 修补画布 -->
         <canvas
           v-if="touchupActive"
@@ -534,161 +768,198 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
           @mouseleave="endTouchupStroke"
           @wheel.prevent="onCanvasWheel"
         />
-
-      </div>
-
-      <!-- 右侧工具栏 -->
-      <div class="side-panel">
-        <!-- 编辑 -->
-        <el-card>
-          <template #header>编辑</template>
-          <template v-if="!cropActive && !touchupActive && !colorActive">
-            <el-button :disabled="processing" @click="startCrop" style="width:100%">
-              <el-icon><Crop /></el-icon> 裁剪
-            </el-button>
-            <p class="tool-desc">自由裁剪，九宫格辅助构图</p>
-          </template>
-          <template v-else-if="cropActive">
-            <div style="margin-bottom:8px">
-              <span class="tool-desc">取景框：{{ Math.round(cropSize * 100) }}%</span>
-              <el-slider v-model="cropSize" :min="0.3" :max="1.0" :step="0.05" size="small" />
-            </div>
-            <div class="btn-row"><el-button type="primary" @click="confirmCrop" style="flex:1">确认</el-button>
-            <el-button @click="cancelCrop" style="flex:1">取消</el-button></div>
-            <p class="tool-desc">滚轮缩放，拖拽移动图片，框内为裁剪结果</p>
-          </template>
-          <template v-else-if="colorActive">
-            <div style="margin-bottom:8px">
-              <span class="tool-desc">背景色</span>
-              <el-color-picker v-model="bgColor" size="small" style="width:100%; margin-top:4px" />
-            </div>
-            <div style="margin-bottom:8px">
-              <span class="tool-desc">容差：{{ colorTolerance }}</span>
-              <el-slider v-model="colorTolerance" :min="0" :max="200" size="small" />
-            </div>
-            <div class="btn-row">
-              <el-button type="primary" @click="applyRemoveColor" :loading="processing" style="flex:1">应用</el-button>
-              <el-button @click="cancelRemoveColor" style="flex:1">取消</el-button>
-            </div>
-            <p class="tool-desc">容差越大去掉的颜色范围越宽</p>
-          </template>
-          <template v-else>
-            <div style="margin-bottom:8px">
-              <el-radio-group v-model="touchupMode" size="small">
-                <el-radio-button value="erase">擦除</el-radio-button>
-                <el-radio-button value="restore">恢复</el-radio-button>
-              </el-radio-group>
-            </div>
-            <div style="margin-bottom:8px">
-              <span class="tool-desc">画笔大小：{{ touchupBrushSize }}px</span>
-              <el-slider v-model="touchupBrushSize" :min="2" :max="80" size="small" />
-            </div>
-            <div class="btn-row"><el-button type="primary" @click="applyTouchup" :loading="processing" style="flex:1">应用</el-button>
-            <el-button @click="cancelTouchup" style="flex:1">取消</el-button></div>
-          </template>
-          <el-divider v-if="!cropActive && !touchupActive && !colorActive" />
-          <template v-if="!cropActive && !touchupActive && !colorActive">
-            <el-button type="primary" :disabled="processing || !image" @click="startRemoveColor" style="width:100%">
-              <el-icon><Aim /></el-icon> 去底色
-            </el-button>
-            <p class="tool-desc">按颜色去透明，适合 AI 生成的白底图标</p>
-            <el-divider />
-            <div class="engine-switch">
-              <span class="tool-desc">抠图引擎</span>
-              <el-radio-group
-                :model-value="engine"
-                size="small"
-                style="width:100%; margin-top:4px"
-                @change="onEngineChange"
-              >
-                <el-radio-button value="local">本地模型</el-radio-button>
-                <el-radio-button value="cloud">云端 阿里云</el-radio-button>
-              </el-radio-group>
-            </div>
-            <template v-if="engine === 'local'">
-              <div class="bg-model-picker">
-                <span class="tool-desc">智能抠图模型（备选）</span>
-                <el-select
-                  :model-value="currentBgModelId"
-                  size="small"
-                  style="width:100%; margin-top:4px"
-                  placeholder="无可用模型"
-                  @change="onBgModelChange"
-                >
-                  <el-option
-                    v-for="m in downloadedBgModels"
-                    :key="m.id"
-                    :value="m.id"
-                    :label="m.name"
-                  />
-                </el-select>
-                <p v-if="!downloadedBgModels.length" class="tool-desc" style="color: var(--el-color-warning)">
-                  尚未下载任何模型，点击下方按钮下载
-                </p>
-              </div>
-              <el-button :disabled="processing || downloading || !downloadedBgModels.length" @click="handleRemoveBg" style="width:100%; margin-top:8px">
-                <el-icon><MagicStick /></el-icon> 智能抠图
-              </el-button>
-              <el-progress v-if="downloading" :percentage="downloadPct" :stroke-width="6" style="margin-top:8px" />
-              <p class="tool-desc">AI 识别物体（适合照片/复杂背景）</p>
-            </template>
-            <template v-else>
-              <div class="bg-model-picker">
-                <span class="tool-desc">云端模型</span>
-                <el-select
-                  :model-value="currentCloudModel"
-                  size="small"
-                  style="width:100%; margin-top:4px"
-                  @change="onCloudModelChange"
-                >
-                  <el-option value="common" label="通用分割" />
-                  <el-option value="commodity" label="商品分割" />
-                </el-select>
-                <p class="tool-desc">商品分割对实拍/产品图标更佳，不适合卡通图</p>
-              </div>
-              <div class="cloud-status" style="margin-top:8px">
-                <span v-if="cloudKeyConfigured" class="tool-desc" style="color: var(--el-color-success)">
-                  ✓ 阿里云 AccessKey 已配置
-                </span>
-                <span v-else class="tool-desc" style="color: var(--el-color-warning)">
-                  未配置 AccessKey，
-                  <el-link type="primary" :underline="false" @click="goToSettings">前往设置</el-link>
-                </span>
-              </div>
-              <el-button :disabled="processing || !cloudKeyConfigured" @click="handleRemoveBg" style="width:100%; margin-top:8px">
-                <el-icon><MagicStick /></el-icon> 智能抠图（云端）
-              </el-button>
-              <p class="tool-desc">阿里云分割抠图，需联网，约 0.002 元/次</p>
-            </template>
-            <el-divider />
-            <el-button :disabled="processing || !image" @click="startTouchup" style="width:100%">
-              <el-icon><Brush /></el-icon> 手动修补
-            </el-button>
-            <p class="tool-desc">画笔擦除/恢复透明区域</p>
-          </template>
-        </el-card>
-
-        <!-- 导出 -->
-        <el-card style="margin-top:12px">
-          <template #header>导出</template>
-          <el-form label-position="top" size="small">
-            <el-form-item label="PNG 尺寸">
-              <el-checkbox-group v-model="pngSizes">
-                <el-checkbox v-for="s in pngAll" :key="s" :value="s">{{ s }}</el-checkbox>
-              </el-checkbox-group>
-            </el-form-item>
-            <el-form-item label="ICO 尺寸">
-              <el-checkbox-group v-model="icoSizes">
-                <el-checkbox v-for="s in icoAll" :key="s" :value="s">{{ s }}</el-checkbox>
-              </el-checkbox-group>
-            </el-form-item>
-            <el-button type="primary" :loading="processing" :disabled="!pngSizes.length && !icoSizes.length" @click="handleExport" style="width:100%">
-              <el-icon><Download /></el-icon> 导出 ZIP
-            </el-button>
-          </el-form>
-        </el-card>
       </div>
     </div>
+
+    <!-- 右侧工具配置抽屉（点工具后滑出，不遮罩画布） -->
+    <el-drawer
+      v-model="drawerVisible"
+      :modal="false"
+      :modal-penetrable="true"
+      :trap-focus="false"
+      :with-header="false"
+      direction="rtl"
+      size="300px"
+      :show-close="false"
+    >
+      <div class="drawer-body">
+        <!-- 标题栏 -->
+        <div class="drawer-header">
+          <span>{{ activeTool ? toolName(activeTool) : '' }}</span>
+          <el-button text @click="closeTool"><el-icon><Close /></el-icon></el-button>
+        </div>
+
+        <!-- 裁剪 -->
+        <div v-if="activeTool === 'crop'" class="drawer-section">
+          <div class="param">
+            <span class="tool-desc">取景框：{{ Math.round(cropSize * 100) }}%</span>
+            <el-slider v-model="cropSize" :min="0.3" :max="1.0" :step="0.05" size="small" />
+          </div>
+          <div class="btn-row">
+            <el-button type="primary" @click="confirmCrop" style="flex:1">确认</el-button>
+            <el-button @click="cancelCrop" style="flex:1">取消</el-button>
+          </div>
+          <p class="tool-desc">滚轮缩放，拖拽移动图片，方向键微调（Shift 加速）</p>
+        </div>
+
+        <!-- 去底色 -->
+        <div v-else-if="activeTool === 'removeColor'" class="drawer-section">
+          <div class="param">
+            <span class="tool-desc">背景色（点画布拾取，或下方调整）</span>
+            <el-color-picker v-model="bgColor" size="small" style="width:100%; margin-top:4px" />
+          </div>
+          <div class="param">
+            <span class="tool-desc">容差：{{ colorTolerance }}</span>
+            <el-slider v-model="colorTolerance" :min="0" :max="200" size="small" />
+          </div>
+          <div class="btn-row">
+            <el-button type="primary" @click="applyRemoveColor" :loading="processing" style="flex:1">应用</el-button>
+            <el-button @click="cancelRemoveColor" style="flex:1">取消</el-button>
+          </div>
+          <p class="tool-desc">直接在画布上点击要去除的颜色（吸管），适合白底图标</p>
+        </div>
+
+        <!-- 抠图 -->
+        <div v-else-if="activeTool === 'removeBg'" class="drawer-section">
+          <div class="engine-switch">
+            <span class="tool-desc">抠图引擎</span>
+            <el-radio-group :model-value="engine" size="small" style="width:100%; margin-top:4px" @change="onEngineChange">
+              <el-radio-button value="local">本地模型</el-radio-button>
+              <el-radio-button value="cloud">云端 阿里云</el-radio-button>
+            </el-radio-group>
+          </div>
+          <template v-if="engine === 'local'">
+            <div class="bg-model-picker" style="margin-top:8px">
+              <span class="tool-desc">智能抠图模型</span>
+              <el-select :model-value="currentBgModelId" size="small" style="width:100%; margin-top:4px" placeholder="无可用模型" @change="onBgModelChange">
+                <el-option v-for="m in downloadedBgModels" :key="m.id" :value="m.id" :label="m.name" />
+              </el-select>
+              <p v-if="!downloadedBgModels.length" class="tool-desc" style="color: var(--el-color-warning)">
+                尚未下载任何模型，点击下方按钮下载
+              </p>
+            </div>
+            <el-button :disabled="processing || downloading || !downloadedBgModels.length" @click="handleRemoveBg" style="width:100%; margin-top:8px">
+              <el-icon><MagicStick /></el-icon> 智能抠图
+            </el-button>
+            <el-progress v-if="downloading" :percentage="downloadPct" :stroke-width="6" style="margin-top:8px" />
+            <p class="tool-desc">AI 识别物体（适合照片/复杂背景）</p>
+          </template>
+          <template v-else>
+            <div class="bg-model-picker" style="margin-top:8px">
+              <span class="tool-desc">云端模型</span>
+              <el-select :model-value="currentCloudModel" size="small" style="width:100%; margin-top:4px" @change="onCloudModelChange">
+                <el-option value="common" label="通用分割" />
+                <el-option value="commodity" label="商品分割" />
+              </el-select>
+              <p class="tool-desc">商品分割对实拍/产品图标更佳</p>
+            </div>
+            <div class="cloud-status" style="margin-top:8px">
+              <span v-if="cloudKeyConfigured" class="tool-desc" style="color: var(--el-color-success)">✓ 阿里云 AccessKey 已配置</span>
+              <span v-else class="tool-desc" style="color: var(--el-color-warning)">
+                未配置 AccessKey，
+                <el-link type="primary" :underline="false" @click="goToSettings">前往设置</el-link>
+              </span>
+            </div>
+            <el-button :disabled="processing || !cloudKeyConfigured" @click="handleRemoveBg" style="width:100%; margin-top:8px">
+              <el-icon><MagicStick /></el-icon> 智能抠图（云端）
+            </el-button>
+            <p class="tool-desc">阿里云分割抠图，需联网，约 0.002 元/次</p>
+          </template>
+        </div>
+
+        <!-- 修补 -->
+        <div v-else-if="activeTool === 'touchup'" class="drawer-section">
+          <div class="param">
+            <el-radio-group v-model="touchupMode" size="small">
+              <el-radio-button value="erase">擦除</el-radio-button>
+              <el-radio-button value="restore">恢复</el-radio-button>
+            </el-radio-group>
+          </div>
+          <div class="param">
+            <span class="tool-desc">画笔大小：{{ touchupBrushSize }}px</span>
+            <el-slider v-model="touchupBrushSize" :min="2" :max="80" size="small" />
+          </div>
+          <div class="btn-row">
+            <el-button type="primary" @click="applyTouchup" :loading="processing" style="flex:1">应用</el-button>
+            <el-button @click="cancelTouchup" style="flex:1">取消</el-button>
+          </div>
+          <p class="tool-desc">画笔擦除/恢复透明区域</p>
+        </div>
+
+        <!-- 智能裁剪 -->
+        <div v-else-if="activeTool === 'smartCrop'" class="drawer-section">
+          <el-button :disabled="processing || !image" @click="handleTrim" style="width:100%">
+            去除透明边距
+          </el-button>
+          <p class="tool-desc">自动裁掉四周空白，主体贴边</p>
+          <el-divider />
+          <span class="tool-desc">按宽高比裁剪</span>
+          <div class="btn-row" style="flex-wrap:wrap; margin-top:6px">
+            <el-button size="small" :disabled="processing || !image" @click="handleCropAspect(1,1)">1:1</el-button>
+            <el-button size="small" :disabled="processing || !image" @click="handleCropAspect(3,4)">3:4</el-button>
+            <el-button size="small" :disabled="processing || !image" @click="handleCropAspect(4,3)">4:3</el-button>
+          </div>
+        </div>
+
+        <!-- 边缘净化 -->
+        <div v-else-if="activeTool === 'edgeRefine'" class="drawer-section">
+          <div class="param">
+            <span class="tool-desc">收缩/描边/去色晕 强度：{{ edgeAmount }}px</span>
+            <el-slider v-model="edgeAmount" :min="1" :max="8" size="small" />
+          </div>
+          <div class="param">
+            <span class="tool-desc">羽化半径：{{ featherAmount }}</span>
+            <el-slider v-model="featherAmount" :min="0.5" :max="4" :step="0.1" size="small" />
+          </div>
+          <div class="param">
+            <span class="tool-desc">内描边颜色</span>
+            <el-color-picker v-model="strokeColor" size="small" style="width:100%; margin-top:4px" />
+          </div>
+          <el-divider />
+          <div class="btn-row" style="flex-wrap:wrap">
+            <el-button size="small" :disabled="processing || !image" @click="handleEdgeRefine('erode')">收缩</el-button>
+            <el-button size="small" :disabled="processing || !image" @click="handleEdgeRefine('feather')">羽化</el-button>
+            <el-button size="small" :disabled="processing || !image" @click="handleEdgeRefine('decontaminate')">去色晕</el-button>
+            <el-button size="small" :disabled="processing || !image" @click="handleEdgeRefine('stroke')">内描边</el-button>
+          </div>
+        </div>
+
+        <!-- 形状遮罩 -->
+        <div v-else-if="activeTool === 'shapeMask'" class="drawer-section">
+          <div class="param">
+            <span class="tool-desc">圆角比例：{{ shapeRatio }}%（短边）</span>
+            <el-slider v-model="shapeRatio" :min="0" :max="50" size="small" />
+          </div>
+          <div class="btn-row">
+            <el-button size="small" :class="{ active: shapePreviewShape === 'rounded' }" :disabled="processing || !image" @click="shapePreviewShape = 'rounded'" style="flex:1">圆角矩形</el-button>
+            <el-button size="small" :class="{ active: shapePreviewShape === 'circle' }" :disabled="processing || !image" @click="shapePreviewShape = 'circle'" style="flex:1">圆形</el-button>
+          </div>
+          <el-button v-if="shapePreviewShape" type="primary" :disabled="processing || !image" @click="handleShapeMask(shapePreviewShape)" style="width:100%; margin-top:8px">
+            <el-icon><Check /></el-icon> 应用{{ shapePreviewShape === 'circle' ? '圆形' : '圆角' }}遮罩
+          </el-button>
+          <p class="tool-desc">先点形状预览，拖滑块实时调圆角，满意后点应用。比例与图片尺寸无关。</p>
+        </div>
+
+        <!-- 调色 -->
+        <div v-else-if="activeTool === 'adjustColor'" class="drawer-section">
+          <div class="param">
+            <span class="tool-desc">亮度：{{ adjBrightness }}</span>
+            <el-slider v-model="adjBrightness" :min="-100" :max="100" size="small" />
+          </div>
+          <div class="param">
+            <span class="tool-desc">对比度：{{ adjContrast }}</span>
+            <el-slider v-model="adjContrast" :min="-100" :max="100" size="small" />
+          </div>
+          <div class="param">
+            <span class="tool-desc">饱和度：{{ adjSaturation }}</span>
+            <el-slider v-model="adjSaturation" :min="-100" :max="100" size="small" />
+          </div>
+          <el-button type="primary" :disabled="processing || !image" @click="handleAdjustColor" style="width:100%; margin-top:8px">
+            应用调色
+          </el-button>
+        </div>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -717,6 +988,7 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
   cursor: grab; min-width: 0;
 }
 .canvas:active { cursor: grabbing; }
+.canvas-eyedropper, .canvas-eyedropper:active { cursor: crosshair; }
 .canvas-bg { position: absolute; inset: 0; }
 
 .canvas-img { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
@@ -737,10 +1009,53 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
 /* 修补画布（覆盖在图片上，接收画笔操作） */
 .touchup-canvas { position: absolute; top: 0; left: 0; pointer-events: auto; cursor: none; }
 
+/* 形状遮罩实时预览（圆角外用暗色 box-shadow 遮罩，圆角内透明看图） */
+.shape-preview { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 6; }
+.shape-preview-inner {
+  /* 用巨大的 spread box-shadow 制造圆角外暗色遮罩；overflow 不需要 */
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.5);
+  background: transparent;
+  border: 2px solid var(--el-color-primary);
+}
+
 .zoom-label { font-size: 12px; color: var(--el-text-color-secondary); min-width: 36px; text-align: center; }
 
-/* 右侧面板 */
-.side-panel { width: 220px; flex-shrink: 0; overflow-y: auto; }
+/* 左侧工具栏（PS 风格竖条） */
+.tool-rail {
+  width: 48px; flex-shrink: 0; display: flex; flex-direction: column;
+  gap: 2px; padding: 6px 0; align-items: center;
+}
+.tool-group {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  width: 100%;
+}
+.tool-group-label {
+  font-size: 9px; color: var(--el-text-color-placeholder);
+  text-align: center; padding: 8px 0 4px; letter-spacing: 1px;
+}
+.tool-group + .tool-group { border-top: 1px solid var(--el-border-color-lighter); margin-top: 4px; }
+.tool-btn {
+  width: 40px; height: 40px; border-radius: 6px; border: 1px solid transparent;
+  background: transparent; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  color: var(--el-text-color-regular); transition: all 0.15s;
+}
+.tool-btn:hover:not(:disabled) { background: var(--el-fill-color-light); }
+.tool-btn.active {
+  background: var(--el-color-primary-light-9);
+  border-color: var(--el-color-primary);
+  color: var(--el-color-primary);
+}
+.tool-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
 .tool-desc { font-size: 12px; color: var(--el-text-color-secondary); margin: 6px 0 0; }
 .btn-row { display: flex; gap: 6px; margin-top: 4px; }
+.param { margin-bottom: 12px; }
+
+/* Drawer 内容 */
+.drawer-body { padding: 16px; }
+.drawer-header {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 15px; font-weight: 600; margin-bottom: 16px;
+}
+.drawer-section { display: flex; flex-direction: column; }
 </style>
