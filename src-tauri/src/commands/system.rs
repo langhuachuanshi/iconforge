@@ -71,9 +71,17 @@ pub async fn create_desktop_shortcut() -> Result<bool, AppError> {
             lnk = lnk_path.replace('\'', "''"),
             exe = exe_path.replace('\'', "''"),
         );
-        let out = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script])
-            .output();
+        let out = {
+            #[cfg(target_os = "windows")]
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let mut cmd = std::process::Command::new("powershell");
+            cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+            // CREATE_NO_WINDOW：彻底避免控制台黑窗闪现（-WindowStyle Hidden 不够）
+            #[cfg(target_os = "windows")]
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            cmd.output()
+        };
         match out {
             Ok(o) if o.status.success() => Ok(true),
             Ok(o) => {
