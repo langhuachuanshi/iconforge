@@ -209,7 +209,12 @@ function selectTool(tool: ToolId) {
   if (activeTool.value && activeTool.value !== tool) {
     cleanupActiveTool()
   }
-  activeTool.value = activeTool.value === tool ? null : tool
+  const willActivate = activeTool.value !== tool
+  activeTool.value = willActivate ? tool : null
+  // 进入修补工具时初始化修补画布（设尺寸 + 画底图）
+  if (willActivate && tool === 'touchup') {
+    initTouchupCanvas()
+  }
 }
 
 function closeTool() {
@@ -231,10 +236,7 @@ const cropBoxStyle = computed(() => {
   return { width: `${side}px`, height: `${side}px` }
 })
 
-function startCrop() {
-  if (!image.value) return
-  activeTool.value = 'crop'
-}
+
 
 function cancelCrop() { activeTool.value = null }
 
@@ -267,10 +269,6 @@ async function confirmCrop() {
 const bgColor = ref('#ffffff')
 const colorTolerance = ref(60)
 
-function startRemoveColor() {
-  if (!image.value) return
-  activeTool.value = 'removeColor'
-}
 
 function cancelRemoveColor() {
   activeTool.value = null
@@ -308,9 +306,8 @@ const touchupMode = ref<'erase' | 'restore'>('erase')
 const touchupBrushSize = ref(20)
 const touchupCanvas = ref<HTMLCanvasElement>()
 
-function startTouchup() {
-  if (!image.value) return
-  activeTool.value = 'touchup'
+/** 初始化修补画布（设尺寸 + 画底图），进入修补工具时调 */
+function initTouchupCanvas() {
   nextTick(() => {
     const tc = touchupCanvas.value; if (!tc) return
     tc.width = imgNatural.value.w; tc.height = imgNatural.value.h

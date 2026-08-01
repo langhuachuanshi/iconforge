@@ -1,211 +1,97 @@
-# ICON 工作台
+# IconForge
 
-为开发者提供一站式 AI 图标生成解决方案：从概念到多格式图标导出的完整工作流。
+AI 图标生成与编辑桌面应用。从概念生成到抠图、编辑、多格式导出的完整工作流，离线可用、数据本地存储。
+
+作者：**Silas** · 奥哈悠工作室 · silas@890625.com
 
 ## 功能
 
-- **AI 图标生成** —— 多服务商支持，用户自行配置 API Key
-  - 通义万相（阿里云）
-  - 字节豆包 Seedream（火山方舟）
-  - 智谱 CogView
-- **图像编辑** —— 居中裁剪为正方形
-- **背景移除** —— 本地 rembg（U2Net 模型），免费、离线、无需 API Key
-- **多格式导出** —— 一键导出 PNG 多尺寸 + ICO 多尺寸（打包 zip）
-- **提示词模板** —— 14 个内置图标风格模板（扁平化、iOS、3D、渐变等）
-- **历史记录** —— 生成的图标自动保存，支持查看/重用/删除
+按工作流组织，菜单顺序即使用顺序：
 
-> API Key 仅保存在浏览器本地（localStorage），不会上传存储，调用时由后端透传给服务商。
-
-## 端口说明
-
-为避免与其他项目冲突，本项目使用非标准端口：
-
-| 服务 | 端口 |
-|------|------|
-| 前端 | **22080** |
-| 后端 | **22443** |
+- **生成图标** —— AI 文生图，支持通义万相（阿里云百炼）、字节豆包 Seedream、智谱 CogView，自带 14 个图标风格模板
+- **编辑图标** —— PS 风格左侧工具栏 + 右侧抽屉配置面板
+  - 智能抠图：本地 ONNX 模型（5 款可选，离线免费）/ 阿里云云端分割
+  - 去底色：色键魔棒，支持画布吸管拾色
+  - 手动修补：画笔擦除/恢复透明区域
+  - 自由裁剪：取景框 + 方向键微调（Shift 加速）
+  - 智能裁剪：去除透明边距、按宽高比裁剪
+  - 边缘净化：收缩、羽化、去色晕、内描边
+  - 形状遮罩：圆角矩形（比例预览）、圆形
+  - 调色：亮度、对比度、饱和度
+- **导出图标** —— 统一导出页，多尺寸 PNG + 多尺寸 ICO 打包 ZIP，支持加入本地图片批量导出
+- **图标提取** —— 从 .exe/.dll/.ocx 提取图标资源
+- **历史记录** —— 生成结果自动保存，编辑版本存档（工程文件），载入时优先恢复最新编辑
 
 ## 技术栈
 
 | 层 | 技术 |
 |----|------|
+| 桌面框架 | Tauri 2.x（Rust 后端 + WebView 前端） |
 | 前端 | Vue 3 + TypeScript + Vite + Element Plus + Pinia |
-| 后端 | Python 3.11 + FastAPI |
-| 图像处理 | Pillow |
-| 抠图 | rembg (U2Net，本地运行) |
+| 图像处理 | image + imageproc（Rust） |
+| 抠图 | ONNX Runtime（本地模型）/ 阿里云 VIAPI（云端） |
 | 数据存储 | SQLite + 文件系统 |
-| 部署 | Docker Compose |
+
+## 快速开始
+
+### 开发
+
+```bash
+# 安装依赖
+pnpm install
+
+# 开发模式（热重载）
+pnpm tauri dev
+```
+
+### 构建
+
+```bash
+# 构建纯净 exe（无安装包）
+pnpm tauri build --no-bundle
+# 产物：src-tauri/target/release/iconforge.exe
+
+# 构建安装包（.msi / .exe 安装器）
+pnpm tauri build
+# 产物：src-tauri/target/release/bundle/
+```
 
 ## 目录结构
 
 ```
-icon-workbench/
-├── backend/                # FastAPI 后端
-│   ├── app/
-│   │   ├── providers/      # AI 服务商抽象（可插拔）
-│   │   ├── services/       # 图像处理 / 抠图 / 导出 / 存储
-│   │   ├── api/            # 路由（generate/edit/export/history）
-│   │   └── data/           # 提示词模板
-│   ├── models/             # rembg 模型文件（不入 git，构建时 COPY）
-│   └── Dockerfile
-├── frontend/               # Vue 3 前端
+iconforge/
+├── src/                        # Vue 前端
+│   ├── views/                  # 各功能页（生成/编辑/导出/提取/历史/设置）
+│   ├── api/client.ts           # Tauri invoke 封装
+│   ├── stores/workspace.ts     # 工作区状态（当前图、图标 id）
+│   └── router/                 # 路由配置
+├── src-tauri/                  # Rust 后端
 │   ├── src/
-│   │   ├── views/          # 生成 / 编辑 / 历史 / 设置 页
-│   │   ├── stores/         # Pinia（settings / workspace）
-│   │   └── api/            # 后端 API 封装
-│   └── Dockerfile
-├── docker/
-│   ├── docker-compose.yml       # 开发/本地部署（构建镜像）
-│   └── docker-compose.prod.yml  # 生产部署（拉取远程镜像）
-├── scripts/
-│   ├── kill-ports.sh       # 按端口停止服务
-│   └── docker-push.sh      # 构建并推送到腾讯云镜像仓库
-└── Makefile                # 常用命令封装
+│   │   ├── commands/           # Tauri 命令（按功能域分文件）
+│   │   ├── services/           # 业务逻辑（图像处理/抠图/导出/存储/签名）
+│   │   ├── models.rs           # 请求/响应结构体
+│   │   └── lib.rs              # 命令注册入口
+│   ├── icons/                  # 应用图标资源
+│   ├── Cargo.toml
+│   └── tauri.conf.json         # Tauri 配置（版本/打包/权限）
+└── package.json
 ```
 
----
+## 配置
 
-## 快速开始
+首次使用前，在应用内 **设置** 页配置：
 
-### 方式一：容器开发（推荐，日常用这个）
+- **生图服务**：至少一个 AI 服务商的 API Key（通义万相 / 豆包 / CogView）
+- **抠图服务**（可选）：本地模型（应用内下载）或阿里云 AccessKey
 
-全用容器开发，**本机不需要装 Python / Node**。容器内带热重载，改代码即时生效。
+本地抠图、图像编辑、形状遮罩、调色等功能**无需任何 Key**，开箱即用。
 
-**前置要求**：Docker + Docker Compose
+## 桌面快捷方式
 
-```bash
-# 1. 构建开发镜像（仅首次，约 5-10 分钟）
-make install
-
-# 2. 启动开发环境（容器内热重载）
-make dev
-
-# 3. 访问
-#    前端:    http://localhost:22080
-#    后端:    http://localhost:22443
-#    API 文档: http://localhost:22443/docs
-
-# 4. 查看日志
-make logs
-
-# 5. 停止
-make down
-```
-
-> 💡 首次启动后端需 30-60 秒加载 rembg 模型，之后重启很快。
-> 改代码后：后端 uvicorn 自动重启，前端 vite HMR 自动刷新，无需重新 build。
-
-### 方式二：本地开发（不用容器，备选）
-
-如果不想用容器，需要本机有 Python 3.11+ 和 Node 20+：
-
-```bash
-# 安装依赖（仅首次）
-cd backend && python -m venv .venv && .venv/bin/pip install -r requirements.txt
-cd frontend && corepack pnpm install
-
-# 启动（本地热重载）
-make dev-local
-
-# 停止用 Ctrl+C
-```
+首次运行时，应用会检测桌面是否已有快捷方式，没有则在右下角弹通知提示创建。可选择：
+- **创建快捷方式** —— 一键创建桌面 .lnk（Windows，兼容 OneDrive 桌面重定向）
+- **不再提示** —— 持久化配置，永不再弹
 
 ---
 
-## Makefile 命令一览
-
-```bash
-make help              # 显示所有命令
-make install           # 构建开发镜像（首次，约 5-10 分钟）
-make dev               # 启动开发环境（容器内热重载）
-make dev-local         # 启动本地开发（不用容器）
-make down              # 停止开发环境
-make logs              # 实时查看日志（Ctrl+C 退出）
-make build             # 构建前端生产产物（验证编译）
-make up                # 生产部署启动（拉取远程镜像）
-make clean             # 停止并清理
-```
-
----
-
-## 配置 API Key
-
-启动应用后，进入 **设置** 页，填入至少一个 AI 服务商的 API Key：
-
-| 服务商 | 获取地址 | 说明 |
-|--------|---------|------|
-| 通义万相 | https://bailian.console.aliyun.com | 阿里云百炼平台 |
-| 字节豆包 | https://console.volcengine.com/ark | 火山方舟 |
-| 智谱 CogView | https://bigmodel.cn | 智谱开放平台（有免费额度） |
-
-> 抠图功能使用本地 rembg，**无需任何 Key**。
-
----
-
-## 部署到服务器
-
-当你确定要发布版本时，推送镜像到腾讯云镜像仓库：
-
-```bash
-# 1. 登录（首次）
-docker login ccr.ccs.tencentyun.com --username=<你的用户名>
-
-# 2. 构建并推送（替换 <命名空间> 为你的实际值）
-./scripts/docker-push.sh <命名空间> latest
-# 例如: ./scripts/docker-push.sh icon-workbench latest
-```
-
-在服务器上部署（只需要 `docker-compose.prod.yml` 这一个文件）：
-
-```bash
-# 1. 登录
-docker login ccr.ccs.tencentyun.com --username=<你的用户名>
-
-# 2. 拉取镜像并启动
-docker compose -f docker-compose.prod.yml up -d
-```
-
----
-
-## API 文档
-
-后端启动后访问 http://localhost:22443/docs 查看 Swagger 文档。
-
-主要接口：
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/health` | 健康检查 |
-| GET | `/api/providers` | 列出所有 AI 服务商 |
-| GET | `/api/templates` | 获取提示词模板 |
-| POST | `/api/generate` | 生成图标（自动保存到历史） |
-| POST | `/api/crop` | 裁剪图片 |
-| POST | `/api/remove-bg` | 移除背景（本地 rembg） |
-| POST | `/api/export` | 导出多格式（ZIP） |
-| GET | `/api/icons` | 历史记录列表 |
-| GET | `/api/icons/{id}` | 获取单张图片 |
-| DELETE | `/api/icons/{id}` | 删除图标 |
-
----
-
-## 新增 AI 服务商
-
-Provider 采用可插拔设计，新增一个服务商只需：
-
-1. 在 `backend/app/providers/` 下新建文件，实现 `ImageProvider` 抽象基类
-2. 用 `@register` 装饰器注册
-3. 在 `backend/app/providers/__init__.py` 中 import 它
-
-无需改动其他代码，前端会自动从 `/api/providers` 拿到新服务商并展示配置项。
-
----
-
-## 后续规划（V2+）
-
-- 矢量化转换（位图转 SVG）
-- 用户系统对接
-- 复杂画布编辑（Fabric.js）
-- 批量生成
-- 异步任务队列（Celery + Redis）
-- 桌面应用封装
-- 自部署 Stable Diffusion 模型支持
+Copyright © 2026 奥哈悠工作室（Silas）
