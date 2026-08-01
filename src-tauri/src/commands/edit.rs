@@ -181,18 +181,19 @@ pub async fn remove_background(
     })
 }
 
-/// 云端抠图（阿里云分割抠图 SegmentCommonImage）
+/// 云端抠图（阿里云分割抠图：通用分割 SegmentCommonImage / 商品分割 SegmentCommodity）
 #[tauri::command]
 pub async fn remove_background_cloud(
     state: State<'_, AppState>,
     req: RemoveBgRequest,
 ) -> Result<ImageResponse, AppError> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(&req.image)?;
-    let (ak, sk) = {
+    let (ak, sk, cloud_model) = {
         let storage = state.storage.lock();
         (
             storage.get_config("aliyun_ak", ""),
             storage.get_config("aliyun_sk", ""),
+            storage.get_config("cloud_model", "common"),
         )
     };
     if ak.is_empty() || sk.is_empty() {
@@ -200,7 +201,8 @@ pub async fn remove_background_cloud(
             "未配置阿里云 AccessKey，请在设置中填写".into(),
         ));
     }
-    let result = services::aliyun_imageseg::remove_background(&bytes, &ak, &sk).await?;
+    let result =
+        services::aliyun_imageseg::remove_background(&bytes, &ak, &sk, &cloud_model).await?;
     Ok(ImageResponse {
         image: base64::engine::general_purpose::STANDARD.encode(&result),
         format: "PNG".into(),

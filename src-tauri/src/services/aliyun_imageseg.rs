@@ -1,9 +1,12 @@
-//! 阿里云 VIAPI 分割抠图（SegmentCommonImage）云端调用
+//! 阿里云 VIAPI 分割抠图云端调用（SegmentCommonImage / SegmentCommodity）
 //!
 //! 流程（图片只接受 URL，所以先上传到阿里云官方临时 Bucket）：
 //!   ① GetOssStsToken —— 拿临时 STS 凭证 + 上传地址
 //!   ② OSS POST 上传 —— 把图片字节上传到官方 Bucket，拼出公网 URL
-//!   ③ SegmentCommonImage —— 用 URL 调抠图，下载返回的透明 PNG
+//!   ③ {Action} —— 用 URL 调抠图，下载返回的透明 PNG
+//!
+//! 两个 Action 同 Version/同入参 ImageURL/同返回 Data.ImageURL/同 cn-shanghai/同同步调用，
+//! 仅 Action 名不同，故参数化 action 名复用整条流水线。
 //!
 //! 参考：
 //!   - 小程序直传方案 https://help.aliyun.com/zh/viapi/developer-reference/small-application-scenario-called-directly
@@ -27,11 +30,18 @@ const UTILS_ENDPOINT: &str = "https://viapiutils.cn-shanghai.aliyuncs.com";
 const SEG_ENDPOINT: &str = "https://imageseg.cn-shanghai.aliyuncs.com";
 
 /// 云端抠图入口：本地图片字节 → 透明 PNG 字节
+///
+/// `model`：`"common"` → SegmentCommonImage（通用分割，默认）；
+///          `"commodity"` → SegmentCommodity（商品分割，实拍/产品类图标更佳）；
+///          其它值统一回落到 common（兜底，不报错）。
 pub async fn remove_background(
     image_bytes: &[u8],
     access_key_id: &str,
     access_key_secret: &str,
+    model: &str,
 ) -> Result<Vec<u8>, AppError> {
+    let action = action_for_model(model);
+
     // ① 拿 STS 凭证 + 上传地址
     let sts = get_oss_sts_token(access_key_id, access_key_secret).await?;
 
@@ -39,11 +49,19 @@ pub async fn remove_background(
     let image_url = upload_to_oss(&sts, image_bytes).await?;
 
     // ③ 调抠图，拿结果 URL
-    let result_url = segment_image(&image_url, access_key_id, access_key_secret).await?;
+    let result_url = segment_image(&image_url, access_key_id, access_key_secret, action).await?;
 
     // ④ 下载结果（透明 PNG）
     let png_bytes = download_result(&result_url).await?;
     Ok(png_bytes)
+}
+
+/// 模型标识 → 阿里云 Action 名。未知值回落 common。
+fn action_for_model(model: &str) -> &'static str {
+    match model {
+        "commodity" => "SegmentCommodity",
+        _ => "SegmentCommonImage",
+    }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -189,18 +207,19 @@ async fn upload_to_oss(sts: &OssSts, image_bytes: &[u8]) -> Result<String, AppEr
 }
 
 // ────────────────────────────────────────────────────────────────
-// ③ SegmentCommonImage
+// ③ 抠图 Action（SegmentCommonImage / SegmentCommodity）
 // ────────────────────────────────────────────────────────────────
 
 async fn segment_image(
     image_url: &str,
     ak: &str,
     sk: &str,
+    action: &str,
 ) -> Result<String, AppError> {
     let nonce = uuid_str();
     let timestamp = now_iso8601();
     let mut params: Vec<(String, String)> = vec![
-        ("Action".into(), "SegmentCommonImage".into()),
+        ("Action".into(), action.into()),
         ("Version".into(), "2019-12-30".into()),
         ("Format".into(), "JSON".into()),
         ("AccessKeyId".into(), ak.into()),
@@ -216,29 +235,29 @@ async fn segment_image(
     params.push(("Signature".into(), sig));
 
     let url = build_signed_url(SEG_ENDPOINT, &params);
-    log::info!("[Aliyun] GET SegmentCommonImage");
+    log::info!("[Aliyun] GET {}", action);
 
     let client = Client::builder().timeout(Duration::from_secs(120)).build()?;
     let resp = client.get(&url).send().await
-        .map_err(|e| AppError::ProviderError(format!("请求 SegmentCommonImage 失败: {e}")))?;
+        .map_err(|e| AppError::ProviderError(format!("请求 {action} 失败: {e}")))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
         return Err(AppError::ProviderError(format!(
-            "SegmentCommonImage 返回错误 ({}): {}",
+            "{action} 返回错误 ({}): {}",
             status.as_u16(),
             &text[..text.len().min(500)]
         )));
     }
     let data: Value = serde_json::from_str(&text)
-        .map_err(|e| AppError::ProviderError(format!("解析 SegmentCommonImage 响应失败: {e}")))?;
+        .map_err(|e| AppError::ProviderError(format!("解析 {action} 响应失败: {e}")))?;
     let result_url = data
         .get("Data")
         .and_then(|d| d.get("ImageURL"))
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
             AppError::ProviderError(format!(
-                "SegmentCommonImage 响应缺少 Data.ImageURL: {}",
+                "{action} 响应缺少 Data.ImageURL: {}",
                 &text[..text.len().min(300)]
             ))
         })?

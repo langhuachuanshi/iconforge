@@ -35,6 +35,7 @@ const downloadedBgModels = computed(() => bgModels.value.filter(m => m.downloade
 // ── 抠图引擎（local 本地模型 / cloud 云端 remove.bg）──
 const engine = ref<'local' | 'cloud'>('local')
 const cloudKeyConfigured = ref(false)
+const currentCloudModel = ref<'common' | 'commodity'>('common')
 
 // ── 画布 ──
 const canvasRef = ref<HTMLElement>()
@@ -304,6 +305,7 @@ async function loadEngineConfig() {
     const cfg = await getConfig()
     engine.value = cfg.bg_engine === 'cloud' ? 'cloud' : 'local'
     cloudKeyConfigured.value = !!(cfg.aliyun_ak && cfg.aliyun_sk)
+    currentCloudModel.value = cfg.cloud_model === 'commodity' ? 'commodity' : 'common'
   } catch { /* 静默，默认 local */ }
 }
 
@@ -316,6 +318,17 @@ async function onBgModelChange(id: string) {
     const m = bgModels.value.find(x => x.id === id)
     bgModels.value.forEach(x => x.current = x.id === id)
     ElMessage.success(`已切换为 ${m?.name ?? id}`)
+  } catch (e: any) {
+    ElMessage.error('切换失败：' + (e?.message || e))
+  }
+}
+
+async function onCloudModelChange(val: 'common' | 'commodity') {
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('set_config', { key: 'cloud_model', value: val })
+    currentCloudModel.value = val
+    ElMessage.success(`已切换为 ${val === 'commodity' ? '商品分割' : '通用分割'}`)
   } catch (e: any) {
     ElMessage.error('切换失败：' + (e?.message || e))
   }
@@ -622,6 +635,19 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
               <p class="tool-desc">AI 识别物体（适合照片/复杂背景）</p>
             </template>
             <template v-else>
+              <div class="bg-model-picker">
+                <span class="tool-desc">云端模型</span>
+                <el-select
+                  :model-value="currentCloudModel"
+                  size="small"
+                  style="width:100%; margin-top:4px"
+                  @change="onCloudModelChange"
+                >
+                  <el-option value="common" label="通用分割" />
+                  <el-option value="commodity" label="商品分割" />
+                </el-select>
+                <p class="tool-desc">商品分割对实拍/产品图标更佳，不适合卡通图</p>
+              </div>
               <div class="cloud-status" style="margin-top:8px">
                 <span v-if="cloudKeyConfigured" class="tool-desc" style="color: var(--el-color-success)">
                   ✓ 阿里云 AccessKey 已配置
