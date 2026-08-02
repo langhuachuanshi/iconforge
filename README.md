@@ -8,7 +8,7 @@ AI 图标生成与编辑桌面应用。从概念生成到抠图、编辑、多�
 
 按工作流组织，菜单顺序即使用顺序：
 
-- **生成图标** —— AI 文生图，支持通义万相（阿里云百炼）、字节豆包 Seedream、智谱 CogView，自带 14 个图标风格模板
+- **生成图标** —— AI 文生图，支持通义万相（阿里云百炼）、字节豆包 Seedream、智谱 CogView，自带 14 个图标风格模板。引导式点选 / 专家式直输两种模式，可一键复制拼装后的完整提示词
 - **编辑图标** —— PS 风格左侧工具栏 + 右侧抽屉配置面板
   - 智能抠图：本地 ONNX 模型（5 款可选，离线免费）/ 阿里云云端分割
   - 去底色：色键魔棒，支持画布吸管拾色
@@ -19,8 +19,8 @@ AI 图标生成与编辑桌面应用。从概念生成到抠图、编辑、多�
   - 形状遮罩：圆角矩形（比例预览）、圆形
   - 调色：亮度、对比度、饱和度
 - **导出图标** —— 统一导出页，多尺寸 PNG + 多尺寸 ICO 打包 ZIP，支持加入本地图片批量导出
-- **图标提取** —— 从 .exe/.dll/.ocx 提取图标资源
-- **历史记录** —— 生成结果自动保存，编辑版本存档（工程文件），载入时优先恢复最新编辑
+- **图标提取** —— 从 .exe/.dll/.ocx 提取图标资源，支持拖入 .lnk 快捷方式（自动解析目标 exe）
+- **历史记录** —— 生成结果自动保存（含完整提示词，可查看/复制），编辑版本存档（工程文件），载入时优先恢复最新编辑
 
 ## 技术栈
 
@@ -47,14 +47,27 @@ pnpm tauri dev
 ### 构建
 
 ```bash
-# 构建纯净 exe（无安装包）
-pnpm tauri build --no-bundle
-# 产物：src-tauri/target/release/iconforge.exe
-
-# 构建安装包（.msi / .exe 安装器）
+# 构建安装包（.msi，Windows）
 pnpm tauri build
-# 产物：src-tauri/target/release/bundle/
+# 产物：src-tauri/target/release/bundle/msi/IconForge_<版本>_x64_zh-CN.msi
 ```
+
+> 只产 MSI（`tauri.conf.json` 的 `bundle.targets` 设为 `["msi"]`）。DirectML.dll（本地抠图 ONNX 后端依赖）会被 Tauri 自动 bundle 进安装包，无需手动配置。
+
+### 发版（CI 自动打包）
+
+通过版本号脚本触发 GitHub Actions 自动构建并发布到 Releases：
+
+```bash
+# 自动算下一版本号 + commit + 打 tag + push（触发 CI）
+pnpm run bump patch    # 0.1.1 → 0.1.2
+pnpm run bump minor    # 0.1.1 → 0.2.0
+pnpm run bump major    # 0.1.1 → 1.0.0
+# 或精确指定
+pnpm run bump 0.2.0
+```
+
+推送 `v*` tag 后，`.github/workflows/release.yml` 在 `windows-latest` 上构建 MSI 并发布到 GitHub Releases（首次构建约 20–40 分钟，ort/ONNX 编译较久）。
 
 ## 目录结构
 
@@ -64,6 +77,7 @@ iconforge/
 │   ├── views/                  # 各功能页（生成/编辑/导出/提取/历史/设置）
 │   ├── api/client.ts           # Tauri invoke 封装
 │   ├── stores/workspace.ts     # 工作区状态（当前图、图标 id）
+│   ├── utils/clipboard.ts      # 剪贴板工具
 │   └── router/                 # 路由配置
 ├── src-tauri/                  # Rust 后端
 │   ├── src/
@@ -74,6 +88,8 @@ iconforge/
 │   ├── icons/                  # 应用图标资源
 │   ├── Cargo.toml
 │   └── tauri.conf.json         # Tauri 配置（版本/打包/权限）
+├── scripts/bump.mjs            # 版本号同步脚本（patch/minor/major + tag）
+├── .github/workflows/release.yml  # tag 触发的发版 CI
 └── package.json
 ```
 
