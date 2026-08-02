@@ -1,7 +1,7 @@
 {
   "name": "iconforge",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "IconForge - AI 图标生成与编辑桌面应用",
   "author": "Silas <silas@890625.com> (奥哈悠工作室)",
   "type": "module",
