@@ -7,7 +7,7 @@ const icons = ref<ExtractedIcon[]>([])
 const processing = ref(false)
 const filePath = ref('')
 
-const PE_EXTS = ['exe', 'dll', 'ocx', 'cpl']
+const PE_EXTS = ['exe', 'dll', 'ocx', 'cpl', 'lnk']
 
 /** 按组聚合：组名 → 该组所有尺寸条目（用于「导出整组 ICO」去重） */
 const groups = computed(() => {
@@ -27,7 +27,7 @@ function pickFile() {
   return import('@tauri-apps/plugin-dialog').then(({ open }) =>
     open({
       multiple: false,
-      filters: [{ name: 'PE 文件', extensions: ['exe', 'dll', 'ocx', 'cpl'] }],
+      filters: [{ name: 'PE 文件', extensions: ['exe', 'dll', 'ocx', 'cpl', 'lnk'] }],
     })
   )
 }
@@ -88,7 +88,7 @@ async function onDrop(e: DragEvent) {
   const files = Array.from(e.dataTransfer?.files ?? [])
   const pe = files.find(isPeFile)
   if (!pe) {
-    ElMessage.warning('请拖入 .exe / .dll / .ocx 文件')
+    ElMessage.warning('请拖入 .exe / .dll / .ocx / .lnk 文件')
     return
   }
   processing.value = true
@@ -165,7 +165,7 @@ function handleClose() {
       <div class="hero-card" :class="{ 'drag-hover': dragOver }" @click="handlePick">
         <el-icon :size="64" class="hero-icon"><FolderOpened /></el-icon>
         <div class="hero-title">提取图标</div>
-        <div class="hero-hint">选择 .exe / .dll / .ocx 文件，或拖拽到此处</div>
+        <div class="hero-hint">选择 .exe / .dll / .ocx / .lnk 文件，或拖拽到此处</div>
       </div>
     </div>
 
