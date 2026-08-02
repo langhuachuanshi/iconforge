@@ -320,6 +320,7 @@ function cleanupActiveTool() {
   // 手动修补：取消未完成的预览 rAF + 重置光标 + 释放离屏原图/入场画布引用
   if (previewRaf) { cancelAnimationFrame(previewRaf); previewRaf = 0 }
   previewUrl.value = ''
+  touchupSourceUrl.value = ''
   brushCursor.value.visible = false
   originalCanvas = null
   entryCanvas = null
@@ -418,6 +419,9 @@ let entryCanvas: HTMLCanvasElement | null = null
 // 抠图前的原图 base64（抠图入口在 syncImage 覆盖前捕获）。
 // 手动修补用它能贴回真实背景像素；尺寸与当前图不符时回退到当前图。
 let touchupSourceB64 = ''
+// 左侧绘画区底图 URL：抠图前原图（data: 前缀完整 URL）。
+// 理解 1 美图式交互：左=原图+标记、右=透明结果。空则回退当前图（未抠图直接修补）。
+const touchupSourceUrl = ref('')
 
 // 右侧实时预览 dataURL（rAF 节流刷新，不进 workspace store，避免污染撤销栈）
 const previewUrl = ref('')
@@ -446,6 +450,8 @@ function initTouchupCanvas() {
     const mc = maskCanvas.value; if (mc) {
       mc.width = imgNatural.value.w; mc.height = imgNatural.value.h
     }
+    // 左侧绘画区底图：优先抠图前原图（带背景），所见即所得；空则回退当前图。
+    touchupSourceUrl.value = touchupSourceB64 ? toDataUrl(touchupSourceB64) : ''
     const img = new Image()
     img.onload = () => {
       // 主修补画布：画底图（可见区 = 当前图）
@@ -1114,7 +1120,7 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
             @wheel="onCanvasWheel"
           >
             <div class="canvas-bg checkerboard" />
-            <img :src="toDataUrl(image)" class="canvas-img" :style="{ transform: imageTransform }" draggable="false" />
+            <img :src="touchupSourceUrl || toDataUrl(image)" class="canvas-img" :style="{ transform: imageTransform }" draggable="false" />
             <canvas
               ref="touchupCanvas"
               class="touchup-canvas"
