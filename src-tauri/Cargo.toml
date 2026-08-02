@@ -45,4 +45,10 @@ hex = "0.4.3"
 imageproc = "0.25"
 tempfile = "3.27.0"
 
+# Release 体积优化：strip 去 debug 符号，lto 跨 crate 联编优化。
+# 不设 opt-level="z"——它会让 ort 推理 / imageproc 图像处理明显变慢，体积收益有限。
+[profile.release]
+strip = true
+lto = true
+
 [dev-dependencies]
