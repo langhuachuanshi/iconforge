@@ -130,6 +130,12 @@ async function handleExportGroupIco(groupName: string, sample: ExtractedIcon) {
     ElMessage.error('导出失败：' + (e?.message || e))
   }
 }
+
+/** 关闭：清空结果与文件路径，回到空状态 hero */
+function handleClose() {
+  icons.value = []
+  filePath.value = ''
+}
 </script>
 
 <template>
@@ -149,7 +155,7 @@ async function handleExportGroupIco(groupName: string, sample: ExtractedIcon) {
         </el-button>
       </div>
       <div class="top-right">
-        <el-button v-if="filePath" size="small" text @click="load" :loading="processing">重新提取</el-button>
+        <el-button size="small" @click="handleClose"><el-icon><Close /></el-icon> 关闭</el-button>
       </div>
     </div>
     <p v-if="filePath && icons.length > 0" class="header-hint file-path" :title="filePath">{{ filePath }}</p>

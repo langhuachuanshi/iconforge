@@ -150,7 +150,7 @@ onMounted(async () => {
   display: flex; align-items: center; gap: 6px;
 }
 
-.titlebar-icon { width: 24px; height: 24px; }
+.titlebar-icon { width: 32px; height: 32px; }
 
 .titlebar-title { font-size: 13px; font-weight: 600; }
 
