@@ -410,10 +410,12 @@ function continueTouchupStroke(e: MouseEvent) {
 /** 单笔触：去除 → destination-out 画圆挖透明；保留 → clip 圆 + 从原图取像素（修复原白色 bug） */
 function paintTouchupStroke(e: MouseEvent) {
   const tc = touchupCanvas.value; if (!tc) return
-  const rect = tc.getBoundingClientRect()
-  // 在画布的内部坐标系中计算坐标
-  const x = (e.clientX - rect.left) / scale.value
-  const y = (e.clientY - rect.top) / scale.value
+  // 触摸 canvas 带 transform(translate+scale)，用它的 getBoundingClientRect 会把变换算两次导致偏移。
+  // 改用容器（.tt-paint，无 transform）的 rect，再手动减 panX/panY、除以 scale，得到画布内部坐标。
+  const rect = canvasRef.value?.getBoundingClientRect()
+  if (!rect) return
+  const x = (e.clientX - rect.left - panX.value) / scale.value
+  const y = (e.clientY - rect.top - panY.value) / scale.value
   const ctx = tc.getContext('2d')!; const r = touchupBrushSize.value
 
   if (touchupMode.value === 'remove') {
@@ -432,10 +434,10 @@ function paintTouchupStroke(e: MouseEvent) {
   schedulePreview()
 }
 
-/** 鼠标屏幕坐标 → 更新笔刷光标圆位置（相对触摸 canvas 容器），并置可见 */
+/** 鼠标屏幕坐标 → 更新笔刷光标圆位置（相对容器，光标是不带 transform 的容器子元素），并置可见 */
 function updateBrushCursor(e: MouseEvent) {
-  const tc = touchupCanvas.value; if (!tc) return
-  const rect = tc.getBoundingClientRect()
+  const rect = canvasRef.value?.getBoundingClientRect()
+  if (!rect) return
   brushCursor.value.x = e.clientX - rect.left
   brushCursor.value.y = e.clientY - rect.top
   brushCursor.value.visible = true
