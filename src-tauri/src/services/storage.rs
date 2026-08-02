@@ -164,6 +164,19 @@ impl Storage {
         Ok(result)
     }
 
+    /// 根据 ID 获取图标的 concept（用于批量导出文件名）
+    pub fn get_icon_concept(&self, icon_id: &str) -> Result<Option<String>, AppError> {
+        let conn = self.conn.lock();
+        let result: Option<String> = conn
+            .query_row(
+                "SELECT concept FROM icons WHERE id = ?1",
+                rusqlite::params![icon_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(result)
+    }
+
     /// 根据 ID 获取图标文件内容（PNG bytes）
     pub fn get_icon_bytes(&self, icon_id: &str) -> Result<Option<Vec<u8>>, AppError> {
         let filename = match self.get_icon_filename(icon_id)? {

@@ -699,14 +699,14 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
 <template>
   <div
     class="edit-root"
-    :class="{ 'drag-active': dragOver }"
+    :class="{ 'drag-active': dragOver && image }"
     @dragenter="onDragEnter"
     @dragover="onDragOver"
     @dragleave="onDragLeave"
     @drop="onDrop"
   >
-    <!-- 顶部栏 -->
-    <div class="top-bar">
+    <!-- 顶部栏（有图才显示） -->
+    <div class="top-bar" v-if="image">
       <div class="top-left">
         <el-upload :show-file-list="false" :before-upload="openFile" accept="image/*">
           <el-button size="small"><el-icon><FolderOpened /></el-icon> 打开</el-button>
@@ -731,12 +731,16 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
       </div>
     </div>
 
-    <!-- 空状态 -->
-    <el-empty v-if="!image" description="打开或生成一张图片开始编辑" class="empty-state">
-      <el-upload :show-file-list="false" :before-upload="openFile" accept="image/*">
-        <el-button type="primary">打开图片</el-button>
+    <!-- 空状态：居中大入口 -->
+    <div v-if="!image" class="empty-hero">
+      <el-upload :show-file-list="false" :before-upload="openFile" accept="image/*" class="hero-upload">
+        <div class="hero-card" :class="{ 'drag-hover': dragOver }">
+          <el-icon :size="64" class="hero-icon"><UploadFilled /></el-icon>
+          <div class="hero-title">打开图片</div>
+          <div class="hero-hint">点击选择，或拖拽图片到此处</div>
+        </div>
       </el-upload>
-    </el-empty>
+    </div>
 
     <!-- 编辑区 -->
     <div v-else class="editor-body">
@@ -991,7 +995,7 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
     </el-drawer>
 
     <!-- 拖拽遮罩 -->
-    <div v-if="dragOver" class="drop-overlay">
+    <div v-if="dragOver && image" class="drop-overlay">
       <el-icon :size="48"><UploadFilled /></el-icon>
       <p>松开以打开图片</p>
     </div>
@@ -1025,6 +1029,27 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
 .top-right { display: flex; gap: 4px; align-items: center; }
 
 .empty-state { flex: 1; display: flex; align-items: center; justify-content: center; }
+
+/* 空状态居中大入口 */
+.empty-hero {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+}
+.hero-upload { display: block; }
+.hero-card {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  width: 360px; padding: 56px 32px;
+  border: 2px dashed var(--el-border-color); border-radius: 16px;
+  background: var(--el-fill-color-light); cursor: pointer;
+  transition: all 0.2s;
+}
+.hero-card:hover, .hero-card.drag-hover {
+  border-color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  transform: translateY(-2px);
+}
+.hero-icon { color: var(--el-color-primary); margin-bottom: 20px; }
+.hero-title { font-size: 20px; font-weight: 600; color: var(--el-text-color-primary); }
+.hero-hint { font-size: 13px; color: var(--el-text-color-secondary); margin-top: 10px; }
 
 .editor-body { flex: 1; display: flex; gap: 12px; min-height: 0; }
 

@@ -7,6 +7,11 @@ use tokio::time::sleep;
 use crate::error::AppError;
 use crate::models::ProviderEntry;
 
+/// 按字符数安全截断字符串（避免 UTF-8 字节边界 panic）
+fn trunc(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
+}
+
 #[derive(Debug)]
 pub struct GenerateResult {
     pub image: Vec<u8>,
@@ -94,8 +99,8 @@ impl OpenAiProvider {
         let status = resp.status().as_u16();
         if !resp.status().is_success() {
             let text = resp.text().await.unwrap_or_default();
-            log::error!("[OpenAI] HTTP {} body={}", status, &text[..text.len().min(500)]);
-            return Err(AppError::ProviderError(format!("{} 返回错误 ({}): {}", config.name, status, &text[..text.len().min(300)])));
+            log::error!("[OpenAI] HTTP {} body={}", status, trunc(&text, 500));
+            return Err(AppError::ProviderError(format!("{} 返回错误 ({}): {}", config.name, status, trunc(&text, 300))));
         }
 
         let data: Value = resp.json().await
@@ -160,8 +165,8 @@ impl OpenAiProvider {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let text = resp.text().await.unwrap_or_default();
-            log::error!("[MaaS] HTTP {} body={}", status, &text[..text.len().min(500)]);
-            return Err(AppError::ProviderError(format!("{} 返回错误 ({}): {}", config.name, status, &text[..text.len().min(300)])));
+            log::error!("[MaaS] HTTP {} body={}", status, trunc(&text, 500));
+            return Err(AppError::ProviderError(format!("{} 返回错误 ({}): {}", config.name, status, trunc(&text, 300))));
         }
 
         let data: Value = resp.json().await
@@ -171,7 +176,7 @@ impl OpenAiProvider {
             .as_str()
             .ok_or_else(|| AppError::ProviderError(format!("{} 返回数据中未找到图片", config.name)))?;
 
-        log::info!("[MaaS] 下载图片: {}", &img_url[..img_url.len().min(80)]);
+        log::info!("[MaaS] 下载图片: {}", trunc(img_url, 80));
 
         let dl = Client::builder().timeout(Duration::from_secs(60)).build()?;
         let img = dl.get(img_url).send().await
@@ -223,7 +228,7 @@ impl OpenAiProvider {
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let text = resp.text().await.unwrap_or_default();
-            return Err(AppError::ProviderError(format!("提交失败 ({}): {}", status, &text[..text.len().min(300)])));
+            return Err(AppError::ProviderError(format!("提交失败 ({}): {}", status, trunc(&text, 300))));
         }
 
         let task_id = resp.json::<Value>().await
@@ -251,7 +256,7 @@ impl OpenAiProvider {
             if !r.status().is_success() {
                 let s = r.status().as_u16();
                 let b = r.text().await.unwrap_or_default();
-                return Err(AppError::ProviderError(format!("查询失败 ({}): {}", s, &b[..b.len().min(200)])));
+                return Err(AppError::ProviderError(format!("查询失败 ({}): {}", s, trunc(&b, 200))));
             }
 
             let data = r.json::<Value>().await

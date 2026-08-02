@@ -46,6 +46,9 @@ pub struct GenerateRequest {
     /// 随机种子，同 seed 重出相似图（可选）
     #[serde(default)]
     pub seed: Option<i64>,
+    /// 专家模式：直接传完整提示词，非空时跳过模板/概念拼接
+    #[serde(default)]
+    pub raw_prompt: Option<String>,
 }
 
 fn default_style() -> String {

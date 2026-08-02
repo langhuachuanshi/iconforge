@@ -50,25 +50,40 @@ pub fn get_templates() -> Vec<Template> {
         .collect()
 }
 
-/// 生成图标
-#[tauri::command]
-pub async fn generate_icon(
-    state: State<'_, AppState>,
-    req: GenerateRequest,
-) -> Result<GenerateResponse, AppError> {
-    // 1. 组装 prompt：模板 + 步骤填充
+/// 引导式 prompt 组装：模板前缀 + extra + 统一收尾
+fn assemble_guided_prompt(req: &GenerateRequest) -> Result<String, AppError> {
     let tpl = templates::get_template(&req.style)
         .ok_or_else(|| AppError::NotFound(format!("风格模板 {} 不存在", req.style)))?;
     let mut prompt = tpl.prompt_prefix.replace("{concept}", &req.concept);
-    // 额外指令追加到末尾（背景、细节、补充等）
     if let Some(extra) = &req.extra {
         if !extra.is_empty() {
             prompt.push_str(". ");
             prompt.push_str(extra);
         }
     }
-    // 统一收尾：图标质量约束
     prompt.push_str(". Centered composition, professional app icon, readable at small sizes");
+    Ok(prompt)
+}
+
+/// 生成图标
+#[tauri::command]
+pub async fn generate_icon(
+    state: State<'_, AppState>,
+    req: GenerateRequest,
+) -> Result<GenerateResponse, AppError> {
+    // 1. 组装 prompt
+    let prompt = if let Some(raw) = &req.raw_prompt {
+        if !raw.trim().is_empty() {
+            // 专家模式：用户直接传完整提示词，跳过模板/概念拼接
+            let mut p = raw.trim().to_string();
+            p.push_str(". Centered composition, professional app icon, readable at small sizes");
+            p
+        } else {
+            assemble_guided_prompt(&req)?
+        }
+    } else {
+        assemble_guided_prompt(&req)?
+    };
 
     // 2. 从 DB 获取服务商配置
     let config = {
@@ -87,7 +102,7 @@ pub async fn generate_icon(
 
     // 3. 调用 OpenAI 兼容 API
     log::info!("[生成] 服务商={} endpoint={} model={} size={}", config.name, config.endpoint, config.model, req.size);
-    log::info!("[生成] prompt={}", &prompt[..prompt.len().min(200)]);
+    log::info!("[生成] prompt={}", prompt.chars().take(200).collect::<String>());
     let result = OpenAiProvider::generate(
         &config,
         &prompt,

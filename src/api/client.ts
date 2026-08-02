@@ -49,6 +49,7 @@ export interface GenerateParams {
   extra?: string
   negativePrompt?: string
   seed?: number | null
+  rawPrompt?: string
 }
 
 export interface GenerateResult {
@@ -215,6 +216,27 @@ export async function exportIcon(
       savePath,
     }),
   )
+}
+
+/**
+ * 批量导出多个历史图标到指定目录（每个图标一个 ZIP）
+ * 返回成功导出的数量
+ */
+export async function exportIconsToDir(
+  iconIds: string[],
+  pngSizes?: number[],
+  icoSizes?: number[],
+): Promise<number> {
+  const { open } = await import('@tauri-apps/plugin-dialog')
+  const selected = await open({ directory: true, multiple: false })
+  if (!selected || Array.isArray(selected)) return 0 // 用户取消
+  const dir = selected as string
+  return invoke<number>('export_icons_to_dir', {
+    iconIds,
+    dir,
+    pngSizes: pngSizes ?? null,
+    icoSizes: icoSizes ?? null,
+  })
 }
 
 export async function listIcons(): Promise<IconMeta[]> {

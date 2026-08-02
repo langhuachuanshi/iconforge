@@ -135,26 +135,37 @@ async function handleExportGroupIco(groupName: string, sample: ExtractedIcon) {
 <template>
   <div
     class="extract-root"
-    :class="{ 'drag-active': dragOver }"
+    :class="{ 'drag-active': dragOver && icons.length > 0 }"
     @dragenter="onDragEnter"
     @dragover="onDragOver"
     @dragleave="onDragLeave"
     @drop="onDrop"
   >
-    <div class="header-row">
-      <h2 class="page-title">图标提取</h2>
-      <div class="header-actions">
-        <el-button type="primary" @click="handlePick" :loading="processing">
-          <el-icon><FolderOpened /></el-icon>&nbsp;选择 PE 文件
+    <!-- 顶部栏（有结果才显示） -->
+    <div class="top-bar" v-if="icons.length > 0">
+      <div class="top-left">
+        <el-button size="small" @click="handlePick" :loading="processing">
+          <el-icon><FolderOpened /></el-icon> 选择 PE 文件
         </el-button>
-        <el-button v-if="filePath" text @click="load" :loading="processing">重新提取</el-button>
+      </div>
+      <div class="top-right">
+        <el-button v-if="filePath" size="small" text @click="load" :loading="processing">重新提取</el-button>
       </div>
     </div>
-    <p v-if="filePath" class="header-hint file-path" :title="filePath">{{ filePath }}</p>
+    <p v-if="filePath && icons.length > 0" class="header-hint file-path" :title="filePath">{{ filePath }}</p>
 
-    <!-- 提取结果 -->
-    <div v-loading="processing" class="result-area">
-      <el-empty v-if="!processing && icons.length === 0" description="选择 .exe / .dll / .ocx 文件以提取图标" />
+    <!-- 空状态：居中大入口 -->
+    <div v-if="!processing && icons.length === 0" class="empty-hero">
+      <div class="hero-card" :class="{ 'drag-hover': dragOver }" @click="handlePick">
+        <el-icon :size="64" class="hero-icon"><FolderOpened /></el-icon>
+        <div class="hero-title">提取图标</div>
+        <div class="hero-hint">选择 .exe / .dll / .ocx 文件，或拖拽到此处</div>
+      </div>
+    </div>
+
+    <!-- 提取结果（有结果或加载中才显示，否则让 hero 居中占满） -->
+    <div v-if="icons.length > 0 || processing" v-loading="processing" class="result-area">
+      <el-empty v-if="processing && icons.length === 0" description="" />
 
       <!-- 按组分区展示 -->
       <div v-else class="groups">
@@ -200,7 +211,7 @@ async function handleExportGroupIco(groupName: string, sample: ExtractedIcon) {
     </div>
 
     <!-- 拖拽遮罩 -->
-    <div v-if="dragOver" class="drop-overlay">
+    <div v-if="dragOver && icons.length > 0" class="drop-overlay">
       <el-icon :size="48"><UploadFilled /></el-icon>
       <p>松开以提取图标</p>
     </div>
@@ -221,12 +232,11 @@ async function handleExportGroupIco(groupName: string, sample: ExtractedIcon) {
 }
 .drop-overlay p { margin-top: 12px; font-size: 18px; font-weight: 600; }
 
-.header-row {
-  display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 8px;
+.top-bar {
+  display: flex; align-items: center; margin-bottom: 8px; flex-shrink: 0; gap: 8px;
 }
-.header-actions { display: flex; align-items: center; gap: 12px; }
-.page-title { margin: 0; font-size: 22px; }
+.top-left { display: flex; gap: 4px; flex: 1; }
+.top-right { display: flex; gap: 4px; align-items: center; }
 .header-hint { margin: 0 0 12px; font-size: 13px; }
 
 .file-path {
@@ -239,6 +249,24 @@ async function handleExportGroupIco(groupName: string, sample: ExtractedIcon) {
 }
 
 .result-area { flex: 1; overflow-y: auto; }
+
+/* 空状态居中大入口（与编辑页统一风格） */
+.empty-hero { flex: 1; display: flex; align-items: center; justify-content: center; }
+.hero-card {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  width: 360px; padding: 56px 32px;
+  border: 2px dashed var(--el-border-color); border-radius: 16px;
+  background: var(--el-fill-color-light); cursor: pointer;
+  transition: all 0.2s;
+}
+.hero-card:hover, .hero-card.drag-hover {
+  border-color: var(--el-color-primary);
+  background: var(--el-color-primary-light-9);
+  transform: translateY(-2px);
+}
+.hero-icon { color: var(--el-color-primary); margin-bottom: 20px; }
+.hero-title { font-size: 20px; font-weight: 600; color: var(--el-text-color-primary); }
+.hero-hint { font-size: 13px; color: var(--el-text-color-secondary); margin-top: 10px; text-align: center; }
 
 .groups { display: flex; flex-direction: column; gap: 20px; }
 

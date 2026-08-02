@@ -34,6 +34,11 @@ const UTILS_HOST: &str = "viapiutils.cn-shanghai.aliyuncs.com";
 const SEG_HOST: &str = "imageseg.cn-shanghai.aliyuncs.com";
 /// 阿里云 VIAPI 官方临时上传桶（GetOssStsToken 不返回，按官方 Demo 写死）
 const OSS_BUCKET_HOST: &str = "https://viapi-customer-temp.oss-cn-shanghai.aliyuncs.com";
+
+/// 按字符数安全截断字符串（避免 UTF-8 字节边界 panic）
+fn trunc(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
+}
 const OSS_BUCKET_NAME: &str = "viapi-customer-temp";
 
 /// 云端抠图入口：本地图片字节 → 透明 PNG 字节
@@ -58,11 +63,11 @@ pub async fn remove_background(
     // 见 https://help.aliyun.com/zh/viapi/getting-started/the-file-url-processing
     // SessionPolicy 的 Resource 限定为 viapi-customer-temp/{永久AK}/*，用临时 AK 前缀会 ImplicitDeny。
     let image_url = upload_to_oss(access_key_id, &sts, image_bytes, logger).await?;
-    logger(&format!("[Aliyun] ② OSS 上传成功，ImageURL={}", &image_url[..image_url.len().min(80)]));
+    logger(&format!("[Aliyun] ② OSS 上传成功，ImageURL={}", trunc(&image_url, 80)));
 
     // ③ 调抠图，拿结果 URL
     let result_url = segment_image(&image_url, access_key_id, access_key_secret, action, logger).await?;
-    logger(&format!("[Aliyun] ③ {action} 成功，结果 URL={}", &result_url[..result_url.len().min(80)]));
+    logger(&format!("[Aliyun] ③ {action} 成功，结果 URL={}", trunc(&result_url, 80)));
 
     // ④ 下载结果（透明 PNG）
     let png_bytes = download_result(&result_url, logger).await?;
@@ -105,12 +110,12 @@ async fn get_oss_sts_token(ak: &str, sk: &str, logger: &Logger) -> Result<OssSts
         .map_err(|e| AppError::ProviderError(format!("请求 GetOssStsToken 失败: {e}")))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
-    logger(&format!("[Aliyun] ① GetOssStsToken 响应 ({}): {}", status.as_u16(), &text[..text.len().min(800)]));
+    logger(&format!("[Aliyun] ① GetOssStsToken 响应 ({}): {}", status.as_u16(), trunc(&text, 800)));
     if !status.is_success() {
         return Err(AppError::ProviderError(format!(
             "GetOssStsToken 返回错误 ({}): {}",
             status.as_u16(),
-            &text[..text.len().min(500)]
+            trunc(&text, 500)
         )));
     }
     let data: Value = serde_json::from_str(&text)
@@ -141,7 +146,7 @@ async fn get_oss_sts_token(ak: &str, sk: &str, logger: &Logger) -> Result<OssSts
     if sts.access_key_id.is_empty() || sts.security_token.is_empty() {
         return Err(AppError::ProviderError(format!(
             "GetOssStsToken 未返回有效凭证（字段名可能不符）: {}",
-            &text[..text.len().min(500)]
+            trunc(&text, 500)
         )));
     }
     Ok(sts)
@@ -208,16 +213,16 @@ async fn upload_to_oss(
     let status = resp.status();
     // 200 成功时 body 为空；失败时 body 是 XML，记录用于诊断
     let text = resp.text().await.unwrap_or_default();
-    logger(&format!("[Aliyun] ② OSS 响应 ({}): {}", status.as_u16(), &text[..text.len().min(800)]));
+    logger(&format!("[Aliyun] ② OSS 响应 ({}): {}", status.as_u16(), trunc(&text, 800)));
     if !status.is_success() {
         return Err(AppError::ProviderError(format!(
             "OSS 上传失败 ({}): {}",
             status.as_u16(),
-            &text[..text.len().min(500)]
+            trunc(&text, 500)
         )));
     }
 
-    logger(&format!("[Aliyun] ② OSS 上传完成，ImageURL={}", &url[..url.len().min(80)]));
+    logger(&format!("[Aliyun] ② OSS 上传完成，ImageURL={}", trunc(&url, 80)));
     Ok(url)
 }
 
@@ -249,12 +254,12 @@ async fn segment_image(
         .map_err(|e| AppError::ProviderError(format!("请求 {action} 失败: {e}")))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
-    logger(&format!("[Aliyun] ③ {action} 响应 ({}): {}", status.as_u16(), &text[..text.len().min(800)]));
+    logger(&format!("[Aliyun] ③ {action} 响应 ({}): {}", status.as_u16(), trunc(&text, 800)));
     if !status.is_success() {
         return Err(AppError::ProviderError(format!(
             "{action} 返回错误 ({}): {}",
             status.as_u16(),
-            &text[..text.len().min(500)]
+            trunc(&text, 500)
         )));
     }
     let data: Value = serde_json::from_str(&text)
@@ -266,7 +271,7 @@ async fn segment_image(
         .ok_or_else(|| {
             AppError::ProviderError(format!(
                 "{action} 响应缺少 Data.ImageURL: {}",
-                &text[..text.len().min(300)]
+                trunc(&text, 300)
             ))
         })?
         .to_string();

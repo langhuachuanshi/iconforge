@@ -60,6 +60,7 @@ pub fn run() {
             commands::edit::apply_shape_mask,
             commands::edit::adjust_color,
             commands::export::export_icon_to_file,
+            commands::export::export_icons_to_dir,
             commands::generate::get_providers,
             commands::generate::get_templates,
             commands::generate::generate_icon,
