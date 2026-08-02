@@ -1,0 +1,51 @@
+name: release
+
+# 触发：推送 v 开头的 tag（如 v0.2.0），或手动 dispatch（调试用）
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write # tauri-action 需要此权限来创建 Release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+
+      - name: install rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      # tauri build 会先跑 beforeBuildCommand(pnpm build 含 vue-tsc)，
+      # 类型检查不过会令 CI 失败，拦住错误发布。
+      - name: build & release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'IconForge ${{ github.ref_name }}'
+          releaseBody: '自动构建。下载下方 `.msi` 安装包运行即可。'
+          releaseDraft: false
+          prerelease: false
