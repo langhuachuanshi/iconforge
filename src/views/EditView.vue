@@ -87,7 +87,8 @@ function undo() {
   if (!undoStack.value.length) return
   redoStack.value.push(base64ToBytes(image.value))
   image.value = bytesToBase64(undoStack.value.pop()!)
-  workspace.setImage(image.value, '')
+  // 撤销/重做只换图，不清来源标签（concept），保留导出命名
+  workspace.setImage(image.value, workspace.currentIconId, workspace.currentConcept)
   isDirty.value = true
 }
 
@@ -95,7 +96,7 @@ function redo() {
   if (!redoStack.value.length) return
   undoStack.value.push(base64ToBytes(image.value))
   image.value = bytesToBase64(redoStack.value.pop()!)
-  workspace.setImage(image.value, '')
+  workspace.setImage(image.value, workspace.currentIconId, workspace.currentConcept)
   isDirty.value = true
 }
 
@@ -649,7 +650,8 @@ function flushPreview() {
 // ── 工具函数 ──
 function syncImage(b64: string) {
   image.value = b64
-  workspace.setImage(b64, '')
+  // 编辑操作（裁剪/抠图/调色等）保留来源 concept，仅换图；导入新图由调用处单独清空
+  workspace.setImage(b64, workspace.currentIconId, workspace.currentConcept)
   const img = new Image()
   img.onload = () => {
     imgNatural.value = { w: img.naturalWidth, h: img.naturalHeight }
@@ -809,6 +811,8 @@ async function openFile(file: File) {
     catch { return false }
   }
   syncImage(await blobToBase64(file))
+  // 导入全新图片：来源标签清空（不再是历史/生成的图）
+  workspace.setImage(image.value, '', '')
   isDirty.value = false
   undoStack.value = []; redoStack.value = []
   touchupSourceB64 = '' // 载入新文件：旧的抠图前快照失效

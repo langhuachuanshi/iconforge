@@ -133,7 +133,7 @@ async function handleReuse(icon: IconMeta) {
       // 无版本 → 载入原图
       base64 = await fetchIconBase64(icon.id)
     }
-    workspace.setImage(base64, icon.id)
+    workspace.setImage(base64, icon.id, icon.concept)
     ElMessage.success(versions.length > 0 ? `已载入最新版本（v${versions[0].versionNo}），跳转编辑页` : '已载入，跳转编辑页')
     router.push('/edit')
   } catch {

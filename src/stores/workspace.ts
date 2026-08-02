@@ -4,20 +4,24 @@ import { ref } from 'vue'
 export const useWorkspaceStore = defineStore('workspace', () => {
   const currentImage = ref('')
   const currentIconId = ref('')
+  /** 当前图的来源标签（用于导出文件名）。编辑操作不清空它，只在新载入图时更新。 */
+  const currentConcept = ref('')
 
   // 撤销/重做
   const undoStack = ref<string[]>([])
   const redoStack = ref<string[]>([])
   const isDirty = ref(false)
 
-  function setImage(base64: string, iconId = '') {
+  function setImage(base64: string, iconId = '', concept = '') {
     currentImage.value = base64
     currentIconId.value = iconId
+    currentConcept.value = concept
   }
 
   function clear() {
     currentImage.value = ''
     currentIconId.value = ''
+    currentConcept.value = ''
     undoStack.value = []
     redoStack.value = []
     isDirty.value = false
@@ -45,5 +49,5 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     isDirty.value = true
   }
 
-  return { currentImage, currentIconId, undoStack, redoStack, isDirty, setImage, clear, pushHistory, undo, redo }
+  return { currentImage, currentIconId, currentConcept, undoStack, redoStack, isDirty, setImage, clear, pushHistory, undo, redo }
 })

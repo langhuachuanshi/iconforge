@@ -290,8 +290,8 @@ async function handleGenerate() {
       try {
         const r = await generateWithRetry(baseParams)
         results.value.push(r)
-        // 第一张作为 workspace 主图（去编辑用）
-        if (results.value.length === 1) workspace.setImage(r.b64, r.iconId)
+        // 第一张作为 workspace 主图（去编辑用）；concept 仅引导式有，专家式留空
+        if (results.value.length === 1) workspace.setImage(r.b64, r.iconId, isExpert ? '' : concept.value.trim())
       } catch (e) {
         fail++
         console.error(`[生成] 第 ${i + 1} 张失败:`, e)
@@ -317,7 +317,8 @@ function useResult(idx: number) {
   const r = results.value[idx]
   if (!r) return
   selectedIdx.value = idx
-  workspace.setImage(r.b64, r.iconId)
+  // 同一批结果 concept 相同；保留当前 concept，iconId 用所选结果
+  workspace.setImage(r.b64, r.iconId, promptMode.value === 'expert' ? '' : concept.value.trim())
 }
 
 function goEdit() {

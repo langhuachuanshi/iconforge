@@ -25,6 +25,12 @@ const icoSizes = ref<number[]>([16, 32, 48, 64, 128, 256])
 const pngAll = [16, 32, 48, 64, 128, 256, 512]
 const icoAll = [16, 32, 48, 64, 128, 256]
 
+/** 生成时间戳字符串 YYYYMMDD_HHmmss（用于导出文件名，唯一可排序） */
+function formatTimestamp(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+}
+
 // 导出进度
 const exportTotal = ref(0)
 const exportCurrent = ref(0)
@@ -60,7 +66,8 @@ onActivated(() => {
       images.value.unshift({
         b64: cur,
         dataUrl: toDataUrl(cur),
-        name: '编辑结果',
+        // 文件名优先用来源 concept（如"咖啡杯"），无则回退 iconforge
+        name: workspace.currentConcept?.trim() || 'iconforge',
         fromEditor: true,
       })
     } else {
@@ -164,9 +171,10 @@ async function handleExport() {
     for (let i = 0; i < images.value.length; i++) {
       exportCurrent.value = i + 1
       const img = images.value[i]
-      // 文件名：原名(去扩展名) + 序号避免重名
-      const baseName = img.name.replace(/\.[^.]+$/, '') || `icon_${i + 1}`
-      const savePath = `${dir}/${baseName}_${i + 1}.zip`
+      // 文件名：原名(去扩展名) + 时间戳（YYYYMMDD_HHmmss），唯一可排序
+      const baseName = img.name.replace(/\.[^.]+$/, '') || 'iconforge'
+      const ts = formatTimestamp(new Date())
+      const savePath = `${dir}/${baseName}_${ts}.zip`
       try {
         await invoke('export_icon_to_file', {
           req: {
