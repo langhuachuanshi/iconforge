@@ -197,9 +197,9 @@ const cropActive = computed(() => activeTool.value === 'crop')
 const colorActive = computed(() => activeTool.value === 'removeColor')
 const touchupActive = computed(() => activeTool.value === 'touchup')
 
-// Drawer 显隐绑定到 activeTool
+// Drawer 显隐绑定到 activeTool（touchup 不走抽屉，控件直接铺在画布上）
 const drawerVisible = computed({
-  get: () => activeTool.value !== null,
+  get: () => activeTool.value !== null && activeTool.value !== 'touchup',
   set: (v: boolean) => { if (!v) closeTool() },
 })
 
@@ -222,9 +222,15 @@ function closeTool() {
   activeTool.value = null
 }
 
-/** 清理当前交互工具的画布状态（仅交互型需要，即时型无状态）。
- *  交互工具的画布元素靠 v-if 绑定 activeTool，切换时自动卸载，这里无需额外操作。 */
-function cleanupActiveTool() {}
+/** 清理当前交互工具的画布状态。
+ *  交互工具的画布元素靠 v-if 绑定 activeTool，切换时自动卸载；这里只清理残留状态。 */
+function cleanupActiveTool() {
+  // 手动修补：取消未完成的预览 rAF + 重置光标 + 释放离屏原图引用
+  if (previewRaf) { cancelAnimationFrame(previewRaf); previewRaf = 0 }
+  previewUrl.value = ''
+  brushCursor.value.visible = false
+  originalCanvas = null
+}
 
 // ── 裁剪（取景框模式：框固定在画布中央，图片在背后缩放/平移） ──
 const cropSize = ref(0.75) // 裁剪框占画布短边比例 0.3~1.0
@@ -300,26 +306,80 @@ async function applyRemoveColor() {
   }
 }
 
-// ── 手动修补 ──（touchupActive 见上方工具状态机 computed）
+// ── 手动修补（美图秀秀风格标记式抠图：去除/保留笔刷 + 反选 + 重置 + 实时预览） ──
+// （touchupActive 见上方工具状态机 computed）
 const touchupPainting = ref(false)
-const touchupMode = ref<'erase' | 'restore'>('erase')
+const touchupMode = ref<'remove' | 'keep'>('remove')
 const touchupBrushSize = ref(20)
 const touchupCanvas = ref<HTMLCanvasElement>()
+// 红色遮罩画布：叠加在修补画布上，半透明红覆盖「保留（可见）」区域，让用户看清涂抹范围
+const maskCanvas = ref<HTMLCanvasElement>()
+// 离屏原图 canvas：保留/反选/重置的像素来源（始终是 pristine 原图，从不修改）
+let originalCanvas: HTMLCanvasElement | null = null
 
-/** 初始化修补画布（设尺寸 + 画底图），进入修补工具时调 */
+// 右侧实时预览 dataURL（rAF 节流刷新，不进 workspace store，避免污染撤销栈）
+const previewUrl = ref('')
+let previewRaf = 0
+// 笔刷光标跟随圆（去除红 / 保留绿）
+const brushCursor = ref({ x: 0, y: 0, visible: false })
+
+/** 初始化修补画布 + 离屏原图 + 红色遮罩画布，进入修补工具时调 */
 function initTouchupCanvas() {
   nextTick(() => {
     const tc = touchupCanvas.value; if (!tc) return
     tc.width = imgNatural.value.w; tc.height = imgNatural.value.h
     const ctx = tc.getContext('2d')!; ctx.clearRect(0, 0, tc.width, tc.height)
+    // 红色遮罩画布同尺寸
+    const mc = maskCanvas.value; if (mc) {
+      mc.width = imgNatural.value.w; mc.height = imgNatural.value.h
+    }
     const img = new Image()
-    img.onload = () => { ctx.drawImage(img, 0, 0) }
+    img.onload = () => {
+      // 主修补画布：画底图（可见区 = 原图）
+      ctx.drawImage(img, 0, 0)
+      // 离屏原图：建一份 pristine 原图，保留/反选/重置从它取像素
+      originalCanvas = document.createElement('canvas')
+      originalCanvas.width = imgNatural.value.w
+      originalCanvas.height = imgNatural.value.h
+      originalCanvas.getContext('2d')!.drawImage(img, 0, 0)
+      schedulePreview()
+      // 绘画区图片自动适中显示（布局变了，需等 DOM 稳定后重算缩放）
+      nextTick(() => requestAnimationFrame(fitToCanvas))
+    }
     img.src = toDataUrl(image.value)
   })
 }
 
-function cancelTouchup() {
-  activeTool.value = null
+/** 重置修补画布：清空 + 重新画原图（全部恢复可见） */
+function resetTouchup() {
+  const tc = touchupCanvas.value; if (!tc || !originalCanvas) return
+  const ctx = tc.getContext('2d')!
+  ctx.globalCompositeOperation = 'source-over'
+  ctx.clearRect(0, 0, tc.width, tc.height)
+  ctx.drawImage(originalCanvas, 0, 0)
+  schedulePreview()
+}
+
+/** 反选：可见区 ↔ 透明区 精确对调
+ *  算法：tmpCanvas 画原图 → destination-out 抠掉「当前可见区」→ 剩下的就是「原透明区」的像素，
+ *  再贴回主画布即完成对调。 */
+function invertTouchup() {
+  const tc = touchupCanvas.value; if (!tc || !originalCanvas) return
+  const w = tc.width, h = tc.height
+  const tmp = document.createElement('canvas')
+  tmp.width = w; tmp.height = h
+  const tctx = tmp.getContext('2d')!
+  // ① 画原图
+  tctx.drawImage(originalCanvas, 0, 0)
+  // ② 抠掉当前主画布可见区 → tmp 剩下「原图有、当前没有」的像素 = 原透明区
+  tctx.globalCompositeOperation = 'destination-out'
+  tctx.drawImage(tc, 0, 0)
+  // ③ 贴回主画布
+  const ctx = tc.getContext('2d')!
+  ctx.globalCompositeOperation = 'source-over'
+  ctx.clearRect(0, 0, w, h)
+  ctx.drawImage(tmp, 0, 0)
+  schedulePreview()
 }
 
 async function applyTouchup() {
@@ -336,14 +396,18 @@ async function applyTouchup() {
 
 function startTouchupStroke(e: MouseEvent) {
   touchupPainting.value = true
+  updateBrushCursor(e)
   paintTouchupStroke(e)
 }
 
 function continueTouchupStroke(e: MouseEvent) {
+  // 无论是否在画，都更新光标位置（鼠标在触摸 canvas 上移动即跟随）
+  updateBrushCursor(e)
   if (!touchupPainting.value) return
   paintTouchupStroke(e)
 }
 
+/** 单笔触：去除 → destination-out 画圆挖透明；保留 → clip 圆 + 从原图取像素（修复原白色 bug） */
 function paintTouchupStroke(e: MouseEvent) {
   const tc = touchupCanvas.value; if (!tc) return
   const rect = tc.getBoundingClientRect()
@@ -352,17 +416,55 @@ function paintTouchupStroke(e: MouseEvent) {
   const y = (e.clientY - rect.top) / scale.value
   const ctx = tc.getContext('2d')!; const r = touchupBrushSize.value
 
-  if (touchupMode.value === 'erase') {
+  if (touchupMode.value === 'remove') {
     ctx.globalCompositeOperation = 'destination-out'
-  } else {
+    ctx.fillStyle = '#000'
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill()
+  } else if (originalCanvas) {
+    // 保留：从离屏原图取像素，恢复真实 RGB（修掉原 #fff 白色 bug）
     ctx.globalCompositeOperation = 'source-over'
-    ctx.fillStyle = '#fff' // 白底恢复
+    ctx.save()
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.clip()
+    ctx.drawImage(originalCanvas, 0, 0)
+    ctx.restore()
   }
-  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill()
   ctx.globalCompositeOperation = 'source-over'
+  schedulePreview()
+}
+
+/** 鼠标屏幕坐标 → 更新笔刷光标圆位置（相对触摸 canvas 容器），并置可见 */
+function updateBrushCursor(e: MouseEvent) {
+  const tc = touchupCanvas.value; if (!tc) return
+  const rect = tc.getBoundingClientRect()
+  brushCursor.value.x = e.clientX - rect.left
+  brushCursor.value.y = e.clientY - rect.top
+  brushCursor.value.visible = true
 }
 
 function endTouchupStroke() { touchupPainting.value = false }
+
+/** rAF 节流：每帧最多一次 —— 刷新预览 dataURL + 重绘红色保留遮罩 */
+function schedulePreview() {
+  if (previewRaf) return
+  previewRaf = requestAnimationFrame(() => {
+    previewRaf = 0
+    const tc = touchupCanvas.value
+    if (tc) previewUrl.value = tc.toDataURL('image/png')
+    // 红色遮罩：清空 → source-in 方式把修补画布的 alpha 通道「染成半透明红」。
+    // 保留区（可见=alpha>0）显红，去除区（透明=alpha=0）无遮罩露出棋盘格。
+    const mc = maskCanvas.value
+    if (mc && tc && mc.width === tc.width) {
+      const mctx = mc.getContext('2d')!
+      mctx.globalCompositeOperation = 'source-over'
+      mctx.clearRect(0, 0, mc.width, mc.height)
+      mctx.drawImage(tc, 0, 0) // 拿到修补画布的形状（带 alpha）
+      mctx.globalCompositeOperation = 'source-in'
+      mctx.fillStyle = 'rgba(220, 40, 40, 0.45)'
+      mctx.fillRect(0, 0, mc.width, mc.height)
+      mctx.globalCompositeOperation = 'source-over'
+    }
+  })
+}
 
 
 // ── 工具函数 ──
@@ -398,7 +500,10 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 onMounted(() => document.addEventListener('keydown', onKeydown))
-onUnmounted(() => document.removeEventListener('keydown', onKeydown))
+onUnmounted(() => {
+  document.removeEventListener('keydown', onKeydown)
+  if (previewRaf) cancelAnimationFrame(previewRaf)
+})
 
 // ── 加载抠图模型列表 ──
 async function loadBgModels() {
@@ -640,9 +745,8 @@ async function handleEdgeRefine(op: 'erode' | 'feather' | 'decontaminate' | 'str
 }
 
 // ── 形状遮罩 ──
-// shapeRatio 用「短边百分比」（0~50），与图片尺寸无关，不同大小图视觉圆角一致
+// shapeRatio 用「短边百分比」（0~50），0=直角，50%=正圆，与图片尺寸无关
 const shapeRatio = ref(15)
-const shapePreviewShape = ref<'rounded' | 'circle' | null>(null) // 预览中的形状（null=不预览）
 
 // 比例 → 像素半径（按短边算），用于调后端
 const shapeRadiusPx = computed(() => {
@@ -650,31 +754,28 @@ const shapeRadiusPx = computed(() => {
   return Math.round((shapeRatio.value / 100) * shortSide)
 })
 
-// 圆角预览框样式：跟随图片 transform，border-radius 用缩放后的显示像素
-const shapePreviewStyle = computed(() => {
-  if (!shapePreviewShape.value) return { display: 'none' }
-  const w = imgNatural.value.w
-  const h = imgNatural.value.h
-  const shortSide = Math.min(w, h)
-  // CSS border-radius 用显示像素（natural × scale）
-  const r = (shapeRatio.value / 100) * shortSide * scale.value
-  const radius = shapePreviewShape.value === 'circle'
-    ? '50%'
-    : `${r}px`
-  return {
-    width: `${w * scale.value}px`,
-    height: `${h * scale.value}px`,
-    borderRadius: radius,
-  }
+// 实时预览：用 CSS clip-path 圆角裁切图片（形状遮罩激活时生效，拖滑块立即变化）
+const shapeClipActive = computed(() => activeTool.value === 'shapeMask')
+const shapePreviewPercent = computed(() => Math.min(shapeRatio.value, 50))
+const shapeClipStyle = computed(() => {
+  if (!shapeClipActive.value) return {}
+  // clip-path 用百分比圆角，0% 直角 → 50% 正圆
+  return { clipPath: `inset(0 round ${shapePreviewPercent.value}%)` }
 })
 
-async function handleShapeMask(shape: 'rounded' | 'circle') {
+// 形状遮罩应用：比例≥50 当圆形（裁内切正方形），否则圆角矩形
+async function handleShapeMask() {
   if (!image.value) return
+  const isCircle = shapeRatio.value >= 50
   pushHistory(); processing.value = true
-  shapePreviewShape.value = null // 应用时关预览
   try {
-    syncImage(await applyShapeMask(image.value, shape, shapeRadiusPx.value))
-    ElMessage.success(shape === 'circle' ? '已应用圆形遮罩' : '已应用圆角遮罩')
+    if (isCircle) {
+      syncImage(await applyShapeMask(image.value, 'circle', 0))
+      ElMessage.success('已应用圆形遮罩（自动裁内切正方形）')
+    } else {
+      syncImage(await applyShapeMask(image.value, 'rounded', shapeRadiusPx.value))
+      ElMessage.success(`已应用圆角遮罩（${shapeRatio.value}%）`)
+    }
   } catch (e: any) { ElMessage.error(`应用失败：${e?.message || e}`) } finally { processing.value = false }
 }
 
@@ -761,8 +862,84 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
         </div>
       </div>
 
-      <!-- 画布 -->
+      <!-- 手动修补工具区（隐藏抽屉，控件铺在画布上方 + 画布左右分区） -->
+      <div v-if="touchupActive" class="touchup-workspace">
+        <!-- 顶部控件栏 -->
+        <div class="touchup-toolbar">
+          <div class="tt-mode">
+            <button class="mode-btn" :class="{ active: touchupMode === 'remove', remove: true }" @click="touchupMode = 'remove'">
+              <el-icon :size="18"><Close /></el-icon><span>去除</span>
+            </button>
+            <button class="mode-btn" :class="{ active: touchupMode === 'keep', keep: true }" @click="touchupMode = 'keep'">
+              <el-icon :size="18"><Check /></el-icon><span>保留</span>
+            </button>
+          </div>
+          <div class="tt-brush">
+            <span class="tool-desc">画笔 {{ touchupBrushSize }}px</span>
+            <el-slider v-model="touchupBrushSize" :min="2" :max="80" size="small" style="width:140px" />
+          </div>
+          <div class="tt-actions">
+            <el-button size="small" @click="resetTouchup">重置</el-button>
+            <el-button size="small" @click="invertTouchup">反选</el-button>
+            <el-button size="small" type="primary" @click="applyTouchup" :loading="processing">应用</el-button>
+            <el-button size="small" text @click="closeTool"><el-icon><Close /></el-icon></el-button>
+          </div>
+        </div>
+
+        <!-- 画布：左右分区（左绘画 / 右预览） -->
+        <div class="touchup-canvas-area">
+          <!-- 左：绘画区 -->
+          <div
+            ref="canvasRef"
+            class="canvas tt-paint"
+            v-loading="processing"
+            @wheel="onCanvasWheel"
+          >
+            <div class="canvas-bg checkerboard" />
+            <img :src="toDataUrl(image)" class="canvas-img" :style="{ transform: imageTransform }" draggable="false" />
+            <canvas
+              ref="touchupCanvas"
+              class="touchup-canvas"
+              :style="{ transform: imageTransform, transformOrigin: '0 0' }"
+              @mousedown="startTouchupStroke"
+              @mousemove="continueTouchupStroke"
+              @mouseup="endTouchupStroke"
+              @mouseenter="brushCursor.visible = true"
+              @mouseleave="() => { brushCursor.visible = false; endTouchupStroke() }"
+              @wheel.prevent="onCanvasWheel"
+            />
+            <!-- 红色遮罩画布：覆盖在触摸画布上，半透明红 = 保留区（pointer-events:none 不挡绘制） -->
+            <canvas
+              ref="maskCanvas"
+              class="mask-canvas"
+              :style="{ transform: imageTransform, transformOrigin: '0 0' }"
+            />
+            <!-- 笔刷光标跟随圆（z-index 高于触摸 canvas） -->
+            <div
+              v-show="brushCursor.visible"
+              class="brush-cursor"
+              :class="touchupMode"
+              :style="{
+                left: brushCursor.x + 'px',
+                top: brushCursor.y + 'px',
+                width: touchupBrushSize * scale * 2 + 'px',
+                height: touchupBrushSize * scale * 2 + 'px',
+              }"
+            />
+            <div class="tt-label">绘画区</div>
+          </div>
+
+          <!-- 右：预览区 -->
+          <div class="tt-preview checkerboard">
+            <img v-if="previewUrl" :src="previewUrl" class="preview-img" draggable="false" />
+            <div class="tt-label">预览区</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 画布（其他工具用） -->
       <div
+        v-else
         ref="canvasRef"
         class="canvas"
         :class="{ 'canvas-eyedropper': colorActive }"
@@ -774,8 +951,17 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
         @mouseleave="onCanvasMouseUp"
       >
         <div class="canvas-bg checkerboard" />
-        <img :src="toDataUrl(image)" class="canvas-img" :style="{ transform: imageTransform }" draggable="false" />
+        <img :src="toDataUrl(image)" class="canvas-img" :style="{ transform: imageTransform, ...shapeClipStyle }" draggable="false" />
 
+        <!-- 形状遮罩九宫格辅助线（跟随图片 transform，帮看构图/圆角对称） -->
+        <div v-if="shapeClipActive" class="shape-grid" :style="{ transform: imageTransform, transformOrigin: '0 0', width: imgNatural.w + 'px', height: imgNatural.h + 'px' }">
+          <div class="shape-grid-h" style="top: 33.33%" />
+          <div class="shape-grid-h" style="top: 66.66%" />
+          <div class="shape-grid-v" style="left: 33.33%" />
+          <div class="shape-grid-v" style="left: 66.66%" />
+        </div>
+
+        <!-- 形状遮罩 canvas 预览已移除，改用 CSS clip-path 直接作用于图片 -->
         <!-- 裁剪取景框（固定在画布中央，图片在背后缩放平移） -->
         <div v-if="cropActive" class="crop-overlay">
           <div class="crop-viewfinder" :style="cropBoxStyle">
@@ -783,26 +969,9 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
             <div class="crop-grid-v" v-for="i in 2" :key="'v'+i" :style="{ left: `${(100/3)*i}%` }" />
           </div>
         </div>
-
-        <!-- 形状遮罩实时预览（跟随图片 transform，圆角外区域用暗色遮罩，拖滑块实时变化） -->
-        <div v-if="shapePreviewShape" class="shape-preview" :style="{ transform: imageTransform, transformOrigin: '0 0' }">
-          <div class="shape-preview-inner" :style="shapePreviewStyle"></div>
-        </div>
-
-        <!-- 修补画布 -->
-        <canvas
-          v-if="touchupActive"
-          ref="touchupCanvas"
-          class="touchup-canvas"
-          :style="{ transform: imageTransform, transformOrigin: '0 0' }"
-          @mousedown="startTouchupStroke"
-          @mousemove="continueTouchupStroke"
-          @mouseup="endTouchupStroke"
-          @mouseleave="endTouchupStroke"
-          @wheel.prevent="onCanvasWheel"
-        />
       </div>
     </div>
+
 
     <!-- 右侧工具配置抽屉（点工具后滑出，不遮罩画布） -->
     <el-drawer
@@ -900,25 +1069,6 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
           </template>
         </div>
 
-        <!-- 修补 -->
-        <div v-else-if="activeTool === 'touchup'" class="drawer-section">
-          <div class="param">
-            <el-radio-group v-model="touchupMode" size="small">
-              <el-radio-button value="erase">擦除</el-radio-button>
-              <el-radio-button value="restore">恢复</el-radio-button>
-            </el-radio-group>
-          </div>
-          <div class="param">
-            <span class="tool-desc">画笔大小：{{ touchupBrushSize }}px</span>
-            <el-slider v-model="touchupBrushSize" :min="2" :max="80" size="small" />
-          </div>
-          <div class="btn-row">
-            <el-button type="primary" @click="applyTouchup" :loading="processing" style="flex:1">应用</el-button>
-            <el-button @click="cancelTouchup" style="flex:1">取消</el-button>
-          </div>
-          <p class="tool-desc">画笔擦除/恢复透明区域</p>
-        </div>
-
         <!-- 智能裁剪 -->
         <div v-else-if="activeTool === 'smartCrop'" class="drawer-section">
           <el-button :disabled="processing || !image" @click="handleTrim" style="width:100%">
@@ -959,18 +1109,15 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
 
         <!-- 形状遮罩 -->
         <div v-else-if="activeTool === 'shapeMask'" class="drawer-section">
+          <p class="tool-desc">拖动滑块实时预览圆角效果，画布上的图片会即时变化。</p>
           <div class="param">
-            <span class="tool-desc">圆角比例：{{ shapeRatio }}%（短边）</span>
+            <span class="tool-desc">圆角：{{ shapeRatio }}%<span v-if="shapeRatio >= 50">（正圆）</span></span>
             <el-slider v-model="shapeRatio" :min="0" :max="50" size="small" />
           </div>
-          <div class="btn-row">
-            <el-button size="small" :class="{ active: shapePreviewShape === 'rounded' }" :disabled="processing || !image" @click="shapePreviewShape = 'rounded'" style="flex:1">圆角矩形</el-button>
-            <el-button size="small" :class="{ active: shapePreviewShape === 'circle' }" :disabled="processing || !image" @click="shapePreviewShape = 'circle'" style="flex:1">圆形</el-button>
-          </div>
-          <el-button v-if="shapePreviewShape" type="primary" :disabled="processing || !image" @click="handleShapeMask(shapePreviewShape)" style="width:100%; margin-top:8px">
-            <el-icon><Check /></el-icon> 应用{{ shapePreviewShape === 'circle' ? '圆形' : '圆角' }}遮罩
+          <el-button type="primary" :disabled="processing || !image" @click="handleShapeMask" style="width:100%; margin-top:8px">
+            <el-icon><Check /></el-icon> 应用遮罩
           </el-button>
-          <p class="tool-desc">先点形状预览，拖滑块实时调圆角，满意后点应用。比例与图片尺寸无关。</p>
+          <p class="tool-desc">0% = 直角，50% = 正圆。正圆会自动裁成内切正方形。</p>
         </div>
 
         <!-- 调色 -->
@@ -1062,7 +1209,12 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
 .canvas-eyedropper, .canvas-eyedropper:active { cursor: crosshair; }
 .canvas-bg { position: absolute; inset: 0; }
 
-.canvas-img { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+.canvas-img { position: absolute; top: 0; left: 0; transform-origin: 0 0; z-index: 2; }
+
+/* 形状遮罩九宫格辅助线（叠加在图片上，跟随 transform） */
+.shape-grid { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 3; }
+.shape-grid-h { position: absolute; left: 0; right: 0; border-top: 1px dashed rgba(255,255,255,0.7); }
+.shape-grid-v { position: absolute; top: 0; bottom: 0; border-left: 1px dashed rgba(255,255,255,0.7); }
 
 /* 裁剪取景框（flexbox 居中，不拦截鼠标事件） */
 .crop-overlay {
@@ -1078,15 +1230,77 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
 .crop-grid-v { position: absolute; top: 0; bottom: 0; border-left: 1px dashed rgba(255,255,255,0.6); }
 
 /* 修补画布（覆盖在图片上，接收画笔操作） */
-.touchup-canvas { position: absolute; top: 0; left: 0; pointer-events: auto; cursor: none; }
+.touchup-canvas { position: absolute; top: 0; left: 0; pointer-events: auto; cursor: none; z-index: 8; }
 
-/* 形状遮罩实时预览（圆角外用暗色 box-shadow 遮罩，圆角内透明看图） */
-.shape-preview { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 6; }
-.shape-preview-inner {
-  /* 用巨大的 spread box-shadow 制造圆角外暗色遮罩；overflow 不需要 */
-  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.5);
-  background: transparent;
-  border: 2px solid var(--el-color-primary);
+/* 红色遮罩画布（叠在修补画布上方，标示保留区；不拦截鼠标事件） */
+.mask-canvas { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 9; }
+
+/* 笔刷光标跟随圆（z-index 高于触摸 canvas，确保可见） */
+.brush-cursor {
+  position: absolute; pointer-events: none; z-index: 20;
+  border-radius: 50%; transform: translate(-50%, -50%);
+  border: 1.5px solid;
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.5);
+  transition: border-color 0.15s, background 0.15s;
+}
+.brush-cursor.remove { border-color: var(--el-color-danger); background: rgba(245,108,108,0.18); }
+.brush-cursor.keep   { border-color: var(--el-color-success); background: rgba(103,194,58,0.18); }
+
+/* 手动修补工作区：顶部控件栏 + 下方左右分区的画布 */
+.touchup-workspace {
+  flex: 1; display: flex; flex-direction: column; gap: 8px; min-height: 0; min-width: 0;
+}
+.touchup-toolbar {
+  display: flex; align-items: center; gap: 16px; flex-shrink: 0;
+  padding: 6px 10px; border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px; background: var(--el-bg-color);
+}
+.tt-mode { display: flex; gap: 6px; }
+.tt-brush { display: flex; align-items: center; gap: 8px; }
+.tt-brush .tool-desc { margin: 0; white-space: nowrap; }
+.tt-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+
+/* 工具栏内紧凑模式按钮（图标+文字水平） */
+.touchup-toolbar .mode-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 6px 14px; border-radius: 6px;
+  border: 1px solid var(--el-border-color); background: var(--el-fill-color-blank);
+  color: var(--el-text-color-regular); cursor: pointer;
+  font-size: 13px; transition: all 0.15s;
+}
+.touchup-toolbar .mode-btn:hover { background: var(--el-fill-color-light); }
+.touchup-toolbar .mode-btn.active.remove {
+  border-color: var(--el-color-danger); color: var(--el-color-danger);
+  background: var(--el-color-danger-light-9);
+}
+.touchup-toolbar .mode-btn.active.keep {
+  border-color: var(--el-color-success); color: var(--el-color-success);
+  background: var(--el-color-success-light-9);
+}
+
+/* 画布左右分区：左绘画 / 右预览 */
+.touchup-canvas-area { flex: 1; display: flex; gap: 12px; min-height: 0; }
+.tt-paint { flex: 1; min-width: 0; }
+.tt-preview {
+  flex: 1; min-width: 0; position: relative; border-radius: 6px; overflow: hidden;
+  display: flex; align-items: center; justify-content: center; padding: 8px;
+}
+.tt-preview .preview-img {
+  max-width: 100%; max-height: 100%; object-fit: contain;
+  -webkit-user-drag: none; user-select: none;
+}
+/* 分区角标 */
+.tt-label {
+  position: absolute; top: 6px; left: 8px; z-index: 10;
+  font-size: 11px; color: var(--el-text-color-secondary);
+  background: rgba(0,0,0,0.35); color: #fff;
+  padding: 2px 6px; border-radius: 3px; pointer-events: none;
+}
+
+/* 形状遮罩 canvas 预览（覆盖在图片上方，背景棋盘格透出来） */
+.shape-canvas {
+  position: absolute; top: 0; left: 0; pointer-events: none; z-index: 8;
+  image-rendering: auto;
 }
 
 .zoom-label { font-size: 12px; color: var(--el-text-color-secondary); min-width: 36px; text-align: center; }

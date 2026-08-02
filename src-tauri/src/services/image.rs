@@ -362,7 +362,7 @@ pub fn apply_rounded_mask(image_bytes: &[u8], radius: u32) -> Result<Vec<u8>, Ap
     encode_png(&out)
 }
 
-/// 应用圆形遮罩（内切圆）
+/// 应用圆形遮罩（内切圆）并裁成内切正方形
 pub fn apply_circle_mask(image_bytes: &[u8]) -> Result<Vec<u8>, AppError> {
     let img = decode_rgba(image_bytes)?;
     let (w, h) = (img.width(), img.height());
@@ -378,8 +378,13 @@ pub fn apply_circle_mask(image_bytes: &[u8]) -> Result<Vec<u8>, AppError> {
             mask.put_pixel(x, y, image::Luma([alpha]));
         }
     }
-    let out = apply_alpha_mask(&img, &mask);
-    encode_png(&out)
+    let masked = apply_alpha_mask(&img, &mask);
+    // 裁成内切正方形（短边为边长，居中）
+    let side = w.min(h);
+    let ox = (w - side) / 2;
+    let oy = (h - side) / 2;
+    let cropped = image::imageops::crop_imm(&masked, ox, oy, side, side);
+    encode_png(&cropped.to_image())
 }
 
 // ────────────────────────────────────────────────────────────────

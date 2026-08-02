@@ -332,12 +332,20 @@ function goEdit() {
     <div class="gen-body">
       <!-- 画布：结果预览 -->
       <div class="canvas-area" v-loading="generating" :element-loading-text="genLoadingText">
-        <!-- 多图网格 -->
-        <div v-if="results.length" class="result-grid" :class="`cols-${Math.min(results.length, 4)}`">
+        <!-- 单图：自适应撑满，保持正方形 -->
+        <div v-if="results.length === 1" class="result-single" @click="useResult(0)">
+          <div class="result-cell selected">
+            <img :src="toDataUrl(results[0].b64)" class="result-img" alt="生成结果" />
+            <span class="cell-badge">已选中</span>
+          </div>
+        </div>
+
+        <!-- 多图网格：每个格子 1:1 -->
+        <div v-else-if="results.length > 1" class="result-grid" :class="`cols-${Math.min(results.length, 4)}`">
           <div
             v-for="(r, idx) in results"
             :key="idx"
-            class="result-cell checkerboard"
+            class="result-cell"
             :class="{ selected: selectedIdx === idx }"
             @click="useResult(idx)"
           >
@@ -535,26 +543,39 @@ function goEdit() {
   border-radius: 6px; min-width: 0;
 }
 
+/* 单图：在可用区域内自适应到最大正方形 */
+.result-single {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  width: 100%; min-height: 0; padding: 16px;
+}
+.result-single .result-cell {
+  /* 取宽高较小者作为正方形边长，保证不溢出且尽量大 */
+  width: min(100%, calc(100vh - 200px));
+  aspect-ratio: 1 / 1;
+}
+
 /* 多图网格 */
 .result-grid {
   display: grid; gap: 12px; padding: 16px;
-  width: 100%; flex: 1; min-height: 0; overflow: auto;
+  flex: 1; width: 100%; min-height: 0; min-width: 0;
   align-content: center; justify-content: center;
 }
-/* 按数量定列数：1张1列，2张2列，3-4张2列 */
-.result-grid.cols-1 { grid-template-columns: minmax(0, 480px); }
-.result-grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.result-grid.cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.result-grid.cols-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+/* 多图：每个格子严格 1:1 正方形 */
+.result-grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: 100%; }
+.result-grid.cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: 100%; }
+.result-grid.cols-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: 100%; }
+.result-grid .result-cell { aspect-ratio: 1 / 1; }
 
 .result-cell {
   position: relative; border-radius: 8px; overflow: hidden; cursor: pointer;
   border: 2px solid transparent; transition: border-color 0.15s;
-  min-height: 160px; display: flex; align-items: center; justify-content: center;
+  display: flex; align-items: center; justify-content: center;
+  min-width: 0; max-height: 100%;
+  background: var(--el-fill-color-light);
 }
 .result-cell:hover { border-color: var(--el-color-primary-light-5); }
 .result-cell.selected { border-color: var(--el-color-primary); box-shadow: 0 0 0 2px var(--el-color-primary-light-7); }
-.result-img { max-width: 100%; max-height: 320px; object-fit: contain; }
+.result-img { max-width: 100%; max-height: 100%; object-fit: contain; }
 .cell-badge {
   position: absolute; top: 8px; left: 8px;
   padding: 2px 8px; border-radius: 10px; font-size: 11px;
