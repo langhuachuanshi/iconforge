@@ -71,6 +71,8 @@ export interface IconMeta {
   concept: string
   style: string
   provider: string
+  /** 本次生成用的完整提示词（老记录为空字符串） */
+  prompt: string
   /** PNG 文件绝对路径（仅列表/保存时返回，供 convertFileSrc 直显） */
   path?: string
 }

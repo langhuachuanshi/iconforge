@@ -11,6 +11,7 @@ import {
   type Template,
 } from '../api/client'
 import { useWorkspaceStore } from '../stores/workspace'
+import { copyText } from '../utils/clipboard'
 
 const router = useRouter()
 const route = useRoute()
@@ -323,6 +324,21 @@ function goEdit() {
   if (!workspace.currentImage) return
   router.push('/edit')
 }
+
+// ── 复制提示词 ──
+/** 专家式：复制输入框原文（不含自动追加的收尾） */
+function copyExpertPrompt() {
+  if (!expertPrompt.value.trim()) {
+    ElMessage.warning('提示词为空')
+    return
+  }
+  copyText(expertPrompt.value.trim(), '已复制提示词')
+}
+
+/** 引导式 / 结果区：复制拼装后的完整提示词 */
+function copyFullPrompt() {
+  copyText(finalPrompt.value, '已复制提示词')
+}
 </script>
 
 <template>
@@ -377,14 +393,19 @@ function goEdit() {
             <!-- 专家模式：完整提示词输入 -->
             <template v-if="promptMode === 'expert'">
               <el-form-item>
-                <el-input
-                  v-model="expertPrompt"
-                  type="textarea"
-                  :rows="8"
-                  placeholder="直接输入完整英文提示词，例如：&#10;A 3D rendered app icon of a glowing magic cube, neon edges, dark background, cinematic lighting, no text&#10;&#10;（将原样发送，仅自动追加图标质量收尾）"
-                  maxlength="1000"
-                  show-word-limit
-                />
+                <div class="prompt-input-wrap">
+                  <el-input
+                    v-model="expertPrompt"
+                    type="textarea"
+                    :rows="8"
+                    placeholder="直接输入完整英文提示词，例如：&#10;A 3D rendered app icon of a glowing magic cube, neon edges, dark background, cinematic lighting, no text&#10;&#10;（将原样发送，仅自动追加图标质量收尾）"
+                    maxlength="1000"
+                    show-word-limit
+                  />
+                  <el-button class="copy-fab" size="small" @click="copyExpertPrompt" title="复制提示词">
+                    <el-icon><CopyDocument /></el-icon>
+                  </el-button>
+                </div>
               </el-form-item>
             </template>
 
@@ -479,13 +500,6 @@ function goEdit() {
               <el-input v-model="extraPrompt" type="textarea" :rows="2" placeholder="还想补充什么？例如：参考 iOS 18 风格..." maxlength="300" />
             </el-form-item>
 
-            <!-- 提示词预览（折叠） -->
-            <el-collapse v-model="previewOpenNames">
-              <el-collapse-item title="查看完整提示词" name="prompt">
-                <pre class="prompt-preview">{{ finalPrompt }}</pre>
-                <p v-if="negativePrompt.trim()" class="neg-preview">负向：{{ negativePrompt.trim() }}</p>
-              </el-collapse-item>
-            </el-collapse>
             </template><!-- /引导式 -->
 
             <!-- 高级设置（折叠，两种模式共用） -->
@@ -499,16 +513,16 @@ function goEdit() {
                     </el-option>
                   </el-select>
                 </el-form-item>
+                <el-form-item label="尺寸">
+                  <el-select v-model="selectedSize" style="width:100%">
+                    <el-option v-for="s in sizeOptions" :key="s" :label="s" :value="s" />
+                  </el-select>
+                </el-form-item>
                 <el-form-item label="生成数量">
                   <el-radio-group v-model="genCount" size="small">
                     <el-radio-button :value="1">1 张</el-radio-button>
                     <el-radio-button :value="2">2 张</el-radio-button>
                   </el-radio-group>
-                </el-form-item>
-                <el-form-item label="尺寸">
-                  <el-select v-model="selectedSize" style="width:100%">
-                    <el-option v-for="s in sizeOptions" :key="s" :label="s" :value="s" />
-                  </el-select>
                 </el-form-item>
                 <el-form-item label="负向提示词">
                   <el-input v-model="negativePrompt" type="textarea" :rows="2" placeholder="不希望出现的内容，如：文字、模糊、变形" maxlength="300" />
@@ -516,6 +530,19 @@ function goEdit() {
                 <el-form-item label="随机种子">
                   <el-input v-model="seedInput" placeholder="留空=随机；填数字可复现" />
                 </el-form-item>
+              </el-collapse-item>
+            </el-collapse>
+
+            <!-- 提示词预览（折叠，两种模式共用） -->
+            <el-collapse v-model="previewOpenNames">
+              <el-collapse-item title="查看完整提示词" name="prompt">
+                <div class="prompt-preview-wrap">
+                  <pre class="prompt-preview">{{ finalPrompt }}</pre>
+                  <el-button class="copy-fab" size="small" @click="copyFullPrompt" title="复制提示词">
+                    <el-icon><CopyDocument /></el-icon>
+                  </el-button>
+                </div>
+                <p v-if="negativePrompt.trim()" class="neg-preview">负向：{{ negativePrompt.trim() }}</p>
               </el-collapse-item>
             </el-collapse>
 
@@ -641,4 +668,27 @@ function goEdit() {
   white-space: pre-wrap; word-break: break-word; font-family: ui-monospace, monospace;
 }
 .neg-preview { margin: 8px 0 0; font-size: 12px; color: var(--el-text-color-secondary); }
+
+/* 提示词容器：相对定位，承载悬浮复制按钮 */
+.prompt-input-wrap,
+.prompt-preview-wrap { position: relative; width: 100%; }
+
+/* 悬浮复制按钮：钉在容器右下角，hover 时显现 */
+.copy-fab {
+  position: absolute;
+  right: 6px;
+  /* 专家式 textarea 有 show-word-limit 字数计数行，往上让出 */
+  margin: 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+  z-index: 2;
+}
+.prompt-input-wrap .copy-fab { bottom: 28px; }
+.prompt-preview-wrap .copy-fab { bottom: 6px; }
+.prompt-input-wrap:hover .copy-fab,
+.prompt-preview-wrap:hover .copy-fab {
+  opacity: 1;
+  pointer-events: auto;
+}
 </style>

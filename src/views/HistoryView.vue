@@ -15,6 +15,7 @@ import {
 } from '../api/client'
 import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import { useWorkspaceStore } from '../stores/workspace'
+import { copyText } from '../utils/clipboard'
 
 const router = useRouter()
 const workspace = useWorkspaceStore()
@@ -48,6 +49,16 @@ function invertSelect() {
 }
 function clearSelect() {
   selected.value = new Set()
+}
+
+// ── 提示词查看（dialog）──
+const promptDialog = ref<{ visible: boolean; concept: string; prompt: string }>({
+  visible: false,
+  concept: '',
+  prompt: '',
+})
+function openPromptDialog(icon: IconMeta) {
+  promptDialog.value = { visible: true, concept: icon.concept || '(未命名)', prompt: icon.prompt }
 }
 function toggleSelectMode() {
   selectMode.value = !selectMode.value
@@ -296,6 +307,11 @@ async function handleBatchRegen() {
             <el-button size="small" type="primary" class="action-main" @click.stop="handleReuse(icon)">
               载入编辑
             </el-button>
+            <el-tooltip v-if="icon.prompt" content="提示词" placement="top">
+              <el-button size="small" @click.stop="openPromptDialog(icon)">
+                <el-icon><Document /></el-icon>
+              </el-button>
+            </el-tooltip>
             <el-tooltip content="打开文件夹" placement="top">
               <el-button size="small" @click.stop="handleReveal(icon)">
                 <el-icon><FolderOpened /></el-icon>
@@ -320,6 +336,22 @@ async function handleBatchRegen() {
       <span v-if="loadingMore">加载中…</span>
       <span v-else-if="!hasMore" class="no-more">共 {{ total }} 张</span>
     </div>
+
+    <!-- 提示词查看弹窗 -->
+    <el-dialog
+      v-model="promptDialog.visible"
+      :title="`提示词 · ${promptDialog.concept}`"
+      width="600px"
+      append-to-body
+    >
+      <div class="dialog-prompt-body">{{ promptDialog.prompt }}</div>
+      <template #footer>
+        <el-button @click="promptDialog.visible = false">关闭</el-button>
+        <el-button type="primary" @click="copyText(promptDialog.prompt, '已复制提示词')">
+          <el-icon><CopyDocument /></el-icon>&nbsp;复制
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -418,6 +450,21 @@ async function handleBatchRegen() {
   text-overflow: ellipsis;
   margin-bottom: 10px;
   text-align: center;
+}
+
+/* 提示词 dialog 正文 */
+.dialog-prompt-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--el-text-color-regular);
+  background: var(--el-fill-color-light);
+  padding: 12px;
+  border-radius: 4px;
+  max-height: 50vh;
+  overflow-y: auto;
 }
 
 .info-actions {

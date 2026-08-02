@@ -58,6 +58,7 @@ ALTER TABLE providers ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE providers ADD COLUMN model TEXT NOT NULL DEFAULT '';
 ALTER TABLE providers ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE providers ADD COLUMN supported_sizes TEXT NOT NULL DEFAULT '1024x1024';
+ALTER TABLE icons ADD COLUMN prompt TEXT NOT NULL DEFAULT '';
 ";
 
 /// SQLite + 文件系统持久化层
@@ -92,12 +93,15 @@ impl Storage {
     }
 
     /// 保存图标：写入 PNG 文件 + 插入数据库记录
+    ///
+    /// prompt 为本次生成用的完整提示词（引导式拼装后 / 专家式原文+收尾）。
     pub fn save_icon(
         &self,
         image_bytes: &[u8],
         concept: &str,
         style: &str,
         provider: &str,
+        prompt: &str,
     ) -> Result<IconMeta, AppError> {
         let icon_id = Uuid::new_v4().simple().to_string()[..12].to_string();
         let created_at = Utc::now().to_rfc3339();
@@ -110,8 +114,8 @@ impl Storage {
         // 插入数据库
         let conn = self.conn.lock();
         conn.execute(
-            "INSERT INTO icons (id, created_at, concept, style, provider, filename) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![icon_id, created_at, concept, style, provider, filename],
+            "INSERT INTO icons (id, created_at, concept, style, provider, filename, prompt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![icon_id, created_at, concept, style, provider, filename, prompt],
         )?;
 
         Ok(IconMeta {
@@ -120,6 +124,7 @@ impl Storage {
             concept: concept.to_string(),
             style: style.to_string(),
             provider: provider.to_string(),
+            prompt: prompt.to_string(),
             path: Some(file_path.to_string_lossy().to_string()),
         })
     }
@@ -128,7 +133,7 @@ impl Storage {
     pub fn list_icons(&self, limit: i64, offset: i64) -> Result<Vec<IconMeta>, AppError> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, created_at, concept, style, provider, filename FROM icons ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
+            "SELECT id, created_at, concept, style, provider, filename, prompt FROM icons ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
         )?;
 
         let base_dir = self.base_dir.clone();
@@ -140,6 +145,7 @@ impl Storage {
                 concept: row.get(2)?,
                 style: row.get(3)?,
                 provider: row.get(4)?,
+                prompt: row.get(6)?,
                 path: Some(base_dir.join(filename).to_string_lossy().to_string()),
             })
         })?;

@@ -114,7 +114,7 @@ pub async fn generate_icon(
     // 4. 保存到历史
     let meta = {
         let storage = state.storage.lock();
-        storage.save_icon(&result.image, &req.concept, &req.style, &req.provider)?
+        storage.save_icon(&result.image, &req.concept, &req.style, &req.provider, &prompt)?
     };
 
     let image_b64 = base64::engine::general_purpose::STANDARD.encode(&result.image);
