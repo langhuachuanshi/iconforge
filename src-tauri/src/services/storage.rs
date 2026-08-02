@@ -120,6 +120,7 @@ impl Storage {
             concept: concept.to_string(),
             style: style.to_string(),
             provider: provider.to_string(),
+            path: Some(file_path.to_string_lossy().to_string()),
         })
     }
 
@@ -127,16 +128,19 @@ impl Storage {
     pub fn list_icons(&self, limit: i64, offset: i64) -> Result<Vec<IconMeta>, AppError> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, created_at, concept, style, provider FROM icons ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
+            "SELECT id, created_at, concept, style, provider, filename FROM icons ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
         )?;
 
+        let base_dir = self.base_dir.clone();
         let rows = stmt.query_map(rusqlite::params![limit, offset], |row| {
+            let filename: String = row.get(5)?;
             Ok(IconMeta {
                 id: row.get(0)?,
                 created_at: row.get(1)?,
                 concept: row.get(2)?,
                 style: row.get(3)?,
                 provider: row.get(4)?,
+                path: Some(base_dir.join(filename).to_string_lossy().to_string()),
             })
         })?;
 

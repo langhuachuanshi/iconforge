@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onActivated, ref } from 'vue'
+import { computed, onActivated, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import {
+  convertFileSrc,
   deleteIcon,
   exportIconsToDir,
   fetchIconBase64,
@@ -10,7 +11,6 @@ import {
   listIconVersions,
   loadIconVersion,
   listIcons,
-  toDataUrl,
   type IconMeta,
 } from '../api/client'
 import { revealItemInDir } from '@tauri-apps/plugin-opener'
@@ -21,8 +21,10 @@ const workspace = useWorkspaceStore()
 
 const icons = ref<IconMeta[]>([])
 const loading = ref(false)
-// iconId → data URL 映射（用于缩略图）
-const thumbUrls = ref<Record<string, string>>({})
+const total = ref(0)           // 图标总数（用于分页判断是否到底）
+const pageSize = 30            // 每页条数
+const hasMore = computed(() => icons.value.length < total.value)
+const loadingMore = ref(false)
 
 // ── 多选 ──
 const selected = ref<Set<string>>(new Set())
@@ -52,8 +54,9 @@ function toggleSelectMode() {
   if (!selectMode.value) clearSelect()
 }
 
-// keep-alive 缓存后用 onActivated：每次切回历史页都重新拉列表，
-// 这样在生成页新增图标后切回来能立即看到。
+// keep-alive 缓存后用 onActivated：每次切回历史页都重新拉第一页，
+// 这样在生成页新增图标后切回来能立即看到。现在只拉元数据（文本，毫秒级），
+// 缩略图走 convertFileSrc 由 webview 原生懒加载，不再卡顿。
 onActivated(async () => {
   await loadIcons()
 })
@@ -61,21 +64,51 @@ onActivated(async () => {
 async function loadIcons() {
   loading.value = true
   try {
-    icons.value = await listIcons()
-    for (const icon of icons.value) {
-      try {
-        const result = await fetchIconBase64(icon.id)
-        thumbUrls.value[icon.id] = toDataUrl(result)
-      } catch {
-        thumbUrls.value[icon.id] = ''
-      }
-    }
+    const result = await listIcons(pageSize, 0)
+    icons.value = result.icons
+    total.value = result.count
   } catch {
     ElMessage.error('加载历史记录失败')
   } finally {
     loading.value = false
   }
 }
+
+/** 加载下一页（滚动触底时调用） */
+async function loadMore() {
+  if (loadingMore.value || !hasMore.value) return
+  loadingMore.value = true
+  try {
+    const result = await listIcons(pageSize, icons.value.length)
+    icons.value.push(...result.icons)
+    total.value = result.count
+  } catch {
+    ElMessage.error('加载更多失败')
+  } finally {
+    loadingMore.value = false
+  }
+}
+
+// ── 触底分页：IntersectionObserver 监听 sentinel ──
+const sentinelRef = ref<HTMLElement | null>(null)
+let observer: IntersectionObserver | null = null
+
+function setupObserver() {
+  teardownObserver()
+  const el = sentinelRef.value
+  if (!el) return
+  observer = new IntersectionObserver((entries) => {
+    if (entries[0]?.isIntersecting) loadMore()
+  }, { rootMargin: '200px' })
+  observer.observe(el)
+}
+function teardownObserver() {
+  observer?.disconnect()
+  observer = null
+}
+// sentinel 出现/重置第一页时重新挂载
+watch(sentinelRef, (el) => { if (el) setupObserver() })
+onBeforeUnmount(teardownObserver)
 
 /** 载入到工作区并跳转编辑页：优先载入最新编辑版本，无版本则载原图 */
 async function handleReuse(icon: IconMeta) {
@@ -111,6 +144,7 @@ async function handleDelete(icon: IconMeta) {
   try {
     await deleteIcon(icon.id)
     icons.value = icons.value.filter((i) => i.id !== icon.id)
+    total.value = Math.max(0, total.value - 1)
     ElMessage.success('已删除')
   } catch {
     ElMessage.error('删除失败')
@@ -144,6 +178,7 @@ async function handleBatchDelete() {
     try { await deleteIcon(id); ok++ } catch { fail++ }
   }
   icons.value = icons.value.filter((i) => !selected.value.has(i.id))
+  total.value = Math.max(0, total.value - ok)
   clearSelect()
   ElMessage.success(`已删除 ${ok} 张${fail > 0 ? `（${fail} 张失败）` : ''}`)
 }
@@ -246,8 +281,8 @@ async function handleBatchRegen() {
         </div>
         <div class="icon-thumb checkerboard">
           <img
-            v-if="thumbUrls[icon.id]"
-            :src="thumbUrls[icon.id]"
+            v-if="icon.path"
+            :src="convertFileSrc(icon.path)"
             :alt="icon.concept"
             loading="lazy"
           />
@@ -274,6 +309,16 @@ async function handleBatchRegen() {
           </div>
         </div>
       </el-card>
+    </div>
+
+    <!-- 触底加载更多 -->
+    <div
+      v-if="icons.length > 0"
+      ref="sentinelRef"
+      class="load-more"
+    >
+      <span v-if="loadingMore">加载中…</span>
+      <span v-else-if="!hasMore" class="no-more">共 {{ total }} 张</span>
     </div>
   </div>
 </template>
@@ -382,4 +427,13 @@ async function handleBatchRegen() {
   align-items: center;
 }
 .action-main { flex: 1; }
+
+/* 触底加载更多 */
+.load-more {
+  padding: 24px 0 8px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+}
+.load-more .no-more { opacity: 0.7; }
 </style>

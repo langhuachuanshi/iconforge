@@ -208,6 +208,9 @@ pub struct IconMeta {
     pub concept: String,
     pub style: String,
     pub provider: String,
+    /// PNG 文件绝对路径（仅列表/保存时填充，供前端 convertFileSrc 直显）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// 图标编辑版本（工程文件存档点）

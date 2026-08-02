@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import { save } from '@tauri-apps/plugin-dialog'
 
 // ---------- 内部 helper ----------
@@ -71,6 +71,14 @@ export interface IconMeta {
   concept: string
   style: string
   provider: string
+  /** PNG 文件绝对路径（仅列表/保存时返回，供 convertFileSrc 直显） */
+  path?: string
+}
+
+/** 列表响应（含图标与总数，用于分页） */
+export interface IconListResult {
+  icons: IconMeta[]
+  count: number
 }
 
 /** 图标编辑版本（工程文件存档点） */
@@ -239,9 +247,12 @@ export async function exportIconsToDir(
   })
 }
 
-export async function listIcons(): Promise<IconMeta[]> {
-  const result = await invoke<{ icons: IconMeta[] }>('list_icons')
-  return result.icons
+/** 拉取历史列表（分页）。不传参时由后端走默认值 */
+export async function listIcons(limit?: number, offset?: number): Promise<IconListResult> {
+  return invoke<IconListResult>('list_icons', {
+    limit: limit ?? null,
+    offset: offset ?? null,
+  })
 }
 
 export async function deleteIcon(iconId: string): Promise<void> {
@@ -472,6 +483,9 @@ export function toDataUrl(b64: string, format = 'image/png'): string {
   if (b64.startsWith('data:')) return b64
   return `data:${format};base64,${b64}`
 }
+
+/** 本地文件路径转 webview 可加载的 URL（asset 协议），用于 <img :src> 直显，绕开 base64/IPC */
+export { convertFileSrc }
 
 // ---------- 桌面快捷方式（Windows）----------
 

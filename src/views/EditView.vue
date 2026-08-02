@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, nextTick, onMounted, onActivated, onUnmounted } from 'vue'
+import { computed, ref, watch, nextTick, onMounted, onActivated, onDeactivated, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -52,12 +52,32 @@ const isPanning = ref(false)
 const panStart = ref({ x: 0, y: 0, px: 0, py: 0 })
 
 // ── 撤回/重做 ──
-const undoStack = ref<string[]>([])
-const redoStack = ref<string[]>([])
+// 栈存原始 PNG 字节（Uint8Array）而非 base64 字符串，省 ~33% 内存且减少 GC 压力。
+// image.value 仍为 base64 字符串（不含 data: 前缀），仅在 push/undo 边界做一次转换。
+const undoStack = ref<Uint8Array[]>([])
+const redoStack = ref<Uint8Array[]>([])
+
+/** base64 字符串 → Uint8Array */
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return bytes
+}
+
+/** Uint8Array → base64 字符串 */
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = ''
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + chunk))
+  }
+  return btoa(bin)
+}
 
 function pushHistory() {
   if (!image.value) return
-  undoStack.value.push(image.value)
+  undoStack.value.push(base64ToBytes(image.value))
   if (undoStack.value.length > 50) undoStack.value.shift()
   redoStack.value = []
   isDirty.value = true
@@ -65,16 +85,16 @@ function pushHistory() {
 
 function undo() {
   if (!undoStack.value.length) return
-  redoStack.value.push(image.value)
-  image.value = undoStack.value.pop()!
+  redoStack.value.push(base64ToBytes(image.value))
+  image.value = bytesToBase64(undoStack.value.pop()!)
   workspace.setImage(image.value, '')
   isDirty.value = true
 }
 
 function redo() {
   if (!redoStack.value.length) return
-  undoStack.value.push(image.value)
-  image.value = redoStack.value.pop()!
+  undoStack.value.push(base64ToBytes(image.value))
+  image.value = bytesToBase64(redoStack.value.pop()!)
   workspace.setImage(image.value, '')
   isDirty.value = true
 }
@@ -96,20 +116,33 @@ function fitToCanvas() {
 
 function onCanvasWheel(e: WheelEvent) {
   e.preventDefault()
-  const rect = canvasRef.value?.getBoundingClientRect()
-  if (!rect) return
-  const mx = e.clientX - rect.left, my = e.clientY - rect.top
-  const newScale = Math.max(0.1, Math.min(10, scale.value * (e.deltaY < 0 ? 1.1 : 0.9)))
-  panX.value = mx - (mx - panX.value) * (newScale / scale.value)
-  panY.value = my - (my - panY.value) * (newScale / scale.value)
-  scale.value = newScale
+  zoomTo(scale.value * (e.deltaY < 0 ? 1.1 : 0.9))
+}
+
+/** 以图片自身中心为锚点缩放：无论图片被拖到哪里，放大缩小都原地居中变化 */
+function zoomTo(newScale: number) {
+  if (!imgNatural.value.w) return
+  const s = scale.value
+  const ns = Math.max(0.1, Math.min(10, newScale))
+  // 保持图片中心点（图片坐标系 W/2,H/2）在屏幕上的位置不变：
+  // panX + s·(W/2) = panX' + ns·(W/2) → panX' = panX + (s - ns)·(W/2)
+  const dx = (s - ns) * (imgNatural.value.w / 2)
+  const dy = (s - ns) * (imgNatural.value.h / 2)
+  panX.value += dx
+  panY.value += dy
+  scale.value = ns
+}
+
+/** 按钮缩放（以图片中心为锚点，美图秀秀右下角 +/- 行为） */
+function zoomBy(factor: number) {
+  zoomTo(scale.value * factor)
 }
 
 function onCanvasMouseDown(e: MouseEvent) {
   if (e.button !== 0) return
   if (touchupActive.value) return // 触摸画布自己处理
-  // 去底色模式：点击画布拾取像素颜色（吸管）
-  if (colorActive.value) {
+  // 吸色模式：点击画布拾取像素颜色（写入 eyedropperTarget 指定的颜色）
+  if (eyedropperActive.value) {
     pickColorAt(e.clientX, e.clientY)
     return
   }
@@ -118,34 +151,88 @@ function onCanvasMouseDown(e: MouseEvent) {
   panStart.value = { x: e.clientX, y: e.clientY, px: panX.value, py: panY.value }
 }
 
-/** 吸管：屏幕坐标 → 图像像素 → 取该像素颜色，写入 bgColor */
+/** 吸管：屏幕坐标 → 图像像素 → 取该像素颜色，按 eyedropperTarget 写入对应颜色 ref */
 function pickColorAt(screenX: number, screenY: number) {
-  if (!image.value || !canvasRef.value) return
+  if (!canvasRef.value) return
   const rect = canvasRef.value.getBoundingClientRect()
   // 屏幕坐标 → 图像坐标（与裁剪 confirmCrop 同一套换算）
   const imgX = Math.round((screenX - rect.left - panX.value) / scale.value)
   const imgY = Math.round((screenY - rect.top - panY.value) / scale.value)
   if (imgX < 0 || imgY < 0 || imgX >= imgNatural.value.w || imgY >= imgNatural.value.h) return
-  // 用隐藏 canvas 取像素
+  // 优先用吸色离屏原图同步取像素（快）；未就绪时回退到 new Image
+  const readPixel = (src: HTMLCanvasElement) => {
+    const p = src.getContext('2d')!.getImageData(imgX, imgY, 1, 1).data
+    return '#' + [p[0], p[1], p[2]].map((v) => v.toString(16).padStart(2, '0')).join('')
+  }
+  const apply = (hex: string) => {
+    if (eyedropperTarget.value === 'bg') bgColor.value = hex
+    else if (eyedropperTarget.value === 'stroke') strokeColor.value = hex
+    // 吸完即退出吸色态：光标恢复、按钮取消高亮（单次吸色）
+    eyedropperTarget.value = null
+    eyedropperSource = null
+  }
+  if (eyedropperSource) { apply(readPixel(eyedropperSource)); return }
+  // 回退：临时解码（首次吸色且离屏未就绪）
   const c = document.createElement('canvas')
-  c.width = imgNatural.value.w
-  c.height = imgNatural.value.h
-  const ctx = c.getContext('2d')!
+  c.width = imgNatural.value.w; c.height = imgNatural.value.h
   const img = new Image()
   img.onload = () => {
-    ctx.drawImage(img, 0, 0)
-    const p = ctx.getImageData(imgX, imgY, 1, 1).data
-    const hex = '#' + [p[0], p[1], p[2]].map((v) => v.toString(16).padStart(2, '0')).join('')
-    bgColor.value = hex
+    c.getContext('2d')!.drawImage(img, 0, 0)
+    apply(readPixel(c))
   }
-  img.src = toDataUrl(image.value)
+  img.src = toDataUrl(image.value!)
 }
 
 function onCanvasMouseMove(e: MouseEvent) {
   if (touchupActive.value) return // 触摸画布自己处理
+  // 吸色态：更新吸管光标位置 + 刷新放大镜（DOM 跟随，丝滑），不参与平移
+  if (eyedropperActive.value) {
+    const rect = canvasRef.value?.getBoundingClientRect()
+    if (rect) {
+      eyedropperCursor.value.x = e.clientX - rect.left
+      eyedropperCursor.value.y = e.clientY - rect.top
+      drawLoupe(e.clientX - rect.left, e.clientY - rect.top, rect)
+    }
+    return
+  }
   if (!isPanning.value) return
   panX.value = panStart.value.px + (e.clientX - panStart.value.x)
   panY.value = panStart.value.py + (e.clientY - panStart.value.y)
+}
+
+/** 放大镜：在 loupeCanvas 上绘制鼠标周围像素的放大视图 + 中心十字准星。
+ *  从离屏原图 eyedropperSource 读局部（drawImage 是 GPU 操作，每帧廉价）。 */
+const LOUPE_PIXELS = 9    // 取鼠标周围 9×9 像素
+const LOUPE_ZOOM = 8      // 放大 8 倍
+function drawLoupe(cx: number, cy: number, _rect: DOMRect) {
+  const lc = loupeCanvas.value
+  if (!lc || !eyedropperSource) return
+  // 屏幕坐标 → 图像坐标
+  const imgX = (cx - panX.value) / scale.value
+  const imgY = (cy - panY.value) / scale.value
+  const half = LOUPE_PIXELS / 2
+  const ctx = lc.getContext('2d')!
+  ctx.imageSmoothingEnabled = false
+  ctx.clearRect(0, 0, lc.width, lc.height)
+  // 从离屏原图裁出局部放大绘制（源坐标用图像像素，目标为放大镜 canvas）
+  ctx.drawImage(
+    eyedropperSource,
+    imgX - half, imgY - half, LOUPE_PIXELS, LOUPE_PIXELS, // 源：图像像素区域
+    0, 0, LOUPE_PIXELS * LOUPE_ZOOM, LOUPE_PIXELS * LOUPE_ZOOM, // 目标：放大
+  )
+  // 中心十字准星（标记当前像素）
+  const center = (LOUPE_PIXELS * LOUPE_ZOOM) / 2
+  ctx.strokeStyle = 'rgba(255,255,255,0.9)'
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.moveTo(center - LOUPE_ZOOM, center); ctx.lineTo(center + LOUPE_ZOOM, center)
+  ctx.moveTo(center, center - LOUPE_ZOOM); ctx.lineTo(center, center + LOUPE_ZOOM)
+  ctx.stroke()
+  ctx.strokeStyle = 'rgba(0,0,0,0.6)'
+  ctx.beginPath()
+  ctx.moveTo(center - LOUPE_ZOOM + 1, center); ctx.lineTo(center + LOUPE_ZOOM - 1, center)
+  ctx.moveTo(center, center - LOUPE_ZOOM + 1); ctx.lineTo(center, center + LOUPE_ZOOM - 1)
+  ctx.stroke()
 }
 
 function onCanvasMouseUp() {
@@ -194,14 +281,13 @@ function toolName(id: ToolId): string {
 
 // 桥接现有布尔：画布 v-if / onKeydown / touchup 等逻辑依赖这些，无需改
 const cropActive = computed(() => activeTool.value === 'crop')
-const colorActive = computed(() => activeTool.value === 'removeColor')
 const touchupActive = computed(() => activeTool.value === 'touchup')
 
-// Drawer 显隐绑定到 activeTool（touchup 不走抽屉，控件直接铺在画布上）
-const drawerVisible = computed({
-  get: () => activeTool.value !== null && activeTool.value !== 'touchup',
-  set: (v: boolean) => { if (!v) closeTool() },
-})
+// 吸色目标：null=不吸色；'bg'=写入去底色 bgColor；'stroke'=写入内描边 strokeColor。
+// 由颜色面板开关驱动（setupEyedropperWatcher）：面板打开→按当前工具设目标，面板关闭→清空。
+const eyedropperTarget = ref<'bg' | 'stroke' | null>(null)
+// 是否处于吸色状态（画布显示吸管光标、点击取色）
+const eyedropperActive = computed(() => eyedropperTarget.value !== null)
 
 function selectTool(tool: ToolId) {
   if (!image.value) return
@@ -211,25 +297,32 @@ function selectTool(tool: ToolId) {
   }
   const willActivate = activeTool.value !== tool
   activeTool.value = willActivate ? tool : null
+  // 吸色光标由颜色面板开关驱动（见 setupEyeDropperWatcher），切换工具时清空残留态
+  eyedropperTarget.value = null
   // 进入修补工具时初始化修补画布（设尺寸 + 画底图）
   if (willActivate && tool === 'touchup') {
     initTouchupCanvas()
   }
+  // 工具切换后让图片重新居中适配（用户可能在别的工具下拖动/缩放过）
+  nextTick(() => requestAnimationFrame(fitToCanvas))
 }
 
 function closeTool() {
   cleanupActiveTool()
   activeTool.value = null
+  eyedropperTarget.value = null
+  nextTick(() => requestAnimationFrame(fitToCanvas))
 }
 
 /** 清理当前交互工具的画布状态。
  *  交互工具的画布元素靠 v-if 绑定 activeTool，切换时自动卸载；这里只清理残留状态。 */
 function cleanupActiveTool() {
-  // 手动修补：取消未完成的预览 rAF + 重置光标 + 释放离屏原图引用
+  // 手动修补：取消未完成的预览 rAF + 重置光标 + 释放离屏原图/入场画布引用
   if (previewRaf) { cancelAnimationFrame(previewRaf); previewRaf = 0 }
   previewUrl.value = ''
   brushCursor.value.visible = false
   originalCanvas = null
+  entryCanvas = null
 }
 
 // ── 裁剪（取景框模式：框固定在画布中央，图片在背后缩放/平移） ──
@@ -271,7 +364,7 @@ async function confirmCrop() {
   } catch (e: any) { ElMessage.error(`裁剪失败：${e?.message || e}`) } finally { processing.value = false }
 }
 
-// ── 去底色（魔棒/色键）──（colorActive 见上方工具状态机 computed）
+// ── 去底色（魔棒/色键）──（工具激活时 eyedropperTarget='bg'，点画布吸色）
 const bgColor = ref('#ffffff')
 const colorTolerance = ref(60)
 
@@ -295,6 +388,8 @@ async function applyRemoveColor() {
   pushHistory()
   processing.value = true
   try {
+    // 去底色前快照：同抠图，手动修补需能贴回被去掉的像素
+    touchupSourceB64 = image.value
     const result = await removeColor(image.value, hexToRgb(bgColor.value), colorTolerance.value)
     syncImage(result)
     ElMessage.success('去底色完成')
@@ -314,16 +409,34 @@ const touchupBrushSize = ref(20)
 const touchupCanvas = ref<HTMLCanvasElement>()
 // 红色遮罩画布：叠加在修补画布上，半透明红覆盖「保留（可见）」区域，让用户看清涂抹范围
 const maskCanvas = ref<HTMLCanvasElement>()
-// 离屏原图 canvas：保留/反选/重置的像素来源（始终是 pristine 原图，从不修改）
+// 离屏原图 canvas：保留笔刷 / 反选的像素来源（抠图前的带背景原图，从不修改）。
+// 关键修复：以前取 image.value（抠图后的透明图），导致被抠掉的部分永远补不回来。
 let originalCanvas: HTMLCanvasElement | null = null
+// 入场画布：进入修补工具时的当前图，仅给 reset 用（丢弃笔触 → 回到刚进修补时的状态，
+// 不会被「保留笔刷改用抠图前原图」这件事影响）。
+let entryCanvas: HTMLCanvasElement | null = null
+// 抠图前的原图 base64（抠图入口在 syncImage 覆盖前捕获）。
+// 手动修补用它能贴回真实背景像素；尺寸与当前图不符时回退到当前图。
+let touchupSourceB64 = ''
 
 // 右侧实时预览 dataURL（rAF 节流刷新，不进 workspace store，避免污染撤销栈）
 const previewUrl = ref('')
 let previewRaf = 0
 // 笔刷光标跟随圆（去除红 / 保留绿）
 const brushCursor = ref({ x: 0, y: 0, visible: false })
+// 吸管光标跟随（DOM 元素，比 SVG cursor 丝滑）：吸色态下显示，跟随鼠标
+const eyedropperCursor = ref({ x: 0, y: 0, visible: false })
+// 放大镜 canvas ref（吸色态下实时绘制鼠标周围像素的放大视图）
+const loupeCanvas = ref<HTMLCanvasElement>()
+// 吸色离屏原图：进入吸色态时预解码一次，mousemove 实时取色/绘制放大镜都从它读，避免每帧 new Image
+let eyedropperSource: HTMLCanvasElement | null = null
+// 上一笔触点（画布内部坐标），用于在采样点间画连续线段，消除快速拖动的间隙
+let lastBrushPt: { x: number; y: number } | null = null
 
-/** 初始化修补画布 + 离屏原图 + 红色遮罩画布，进入修补工具时调 */
+/** 初始化修补画布 + 离屏原图 + 入场画布 + 红色遮罩画布，进入修补工具时调。
+ *  - entryCanvas：进入修补时的当前图（仅给 reset 用）
+ *  - originalCanvas：抠图前的原图（给保留笔刷/反选用）。优先用 touchupSourceB64（抠图前快照），
+ *    尺寸不符或不存在时回退到当前图（未抠图直接修补的情况，行为同旧版）。 */
 function initTouchupCanvas() {
   nextTick(() => {
     const tc = touchupCanvas.value; if (!tc) return
@@ -335,14 +448,31 @@ function initTouchupCanvas() {
     }
     const img = new Image()
     img.onload = () => {
-      // 主修补画布：画底图（可见区 = 原图）
+      // 主修补画布：画底图（可见区 = 当前图）
       ctx.drawImage(img, 0, 0)
-      // 离屏原图：建一份 pristine 原图，保留/反选/重置从它取像素
+      // 入场画布：当前图（reset 用）
+      entryCanvas = document.createElement('canvas')
+      entryCanvas.width = imgNatural.value.w
+      entryCanvas.height = imgNatural.value.h
+      entryCanvas.getContext('2d')!.drawImage(img, 0, 0)
+      // 离屏原图：优先抠图前快照，回退当前图。两路图片各自解码、各自 onload 后落地 originalCanvas。
       originalCanvas = document.createElement('canvas')
       originalCanvas.width = imgNatural.value.w
       originalCanvas.height = imgNatural.value.h
-      originalCanvas.getContext('2d')!.drawImage(img, 0, 0)
-      schedulePreview()
+      const octx = originalCanvas.getContext('2d')!
+      octx.drawImage(img, 0, 0) // 先落当前图，保证有可用像素
+      if (touchupSourceB64) {
+        const src = new Image()
+        src.onload = () => {
+          // 尺寸必须匹配，否则坐标系错乱；不符则保留上面已落的当前图
+          if (src.naturalWidth === imgNatural.value.w && src.naturalHeight === imgNatural.value.h) {
+            octx.clearRect(0, 0, originalCanvas!.width, originalCanvas!.height)
+            octx.drawImage(src, 0, 0)
+          }
+        }
+        src.src = toDataUrl(touchupSourceB64)
+      }
+      schedulePreview(); flushPreview()
       // 绘画区图片自动适中显示（布局变了，需等 DOM 稳定后重算缩放）
       nextTick(() => requestAnimationFrame(fitToCanvas))
     }
@@ -350,14 +480,14 @@ function initTouchupCanvas() {
   })
 }
 
-/** 重置修补画布：清空 + 重新画原图（全部恢复可见） */
+/** 重置修补画布：清空 + 重新画入场图（回到刚进入修补时的状态，丢弃所有笔触） */
 function resetTouchup() {
-  const tc = touchupCanvas.value; if (!tc || !originalCanvas) return
+  const tc = touchupCanvas.value; if (!tc || !entryCanvas) return
   const ctx = tc.getContext('2d')!
   ctx.globalCompositeOperation = 'source-over'
   ctx.clearRect(0, 0, tc.width, tc.height)
-  ctx.drawImage(originalCanvas, 0, 0)
-  schedulePreview()
+  ctx.drawImage(entryCanvas, 0, 0)
+  schedulePreview(); flushPreview()
 }
 
 /** 反选：可见区 ↔ 透明区 精确对调
@@ -379,7 +509,7 @@ function invertTouchup() {
   ctx.globalCompositeOperation = 'source-over'
   ctx.clearRect(0, 0, w, h)
   ctx.drawImage(tmp, 0, 0)
-  schedulePreview()
+  schedulePreview(); flushPreview()
 }
 
 async function applyTouchup() {
@@ -396,6 +526,7 @@ async function applyTouchup() {
 
 function startTouchupStroke(e: MouseEvent) {
   touchupPainting.value = true
+  lastBrushPt = null // 新一笔从当前点开始，不与上一笔连线
   updateBrushCursor(e)
   paintTouchupStroke(e)
 }
@@ -407,7 +538,11 @@ function continueTouchupStroke(e: MouseEvent) {
   paintTouchupStroke(e)
 }
 
-/** 单笔触：去除 → destination-out 画圆挖透明；保留 → clip 圆 + 从原图取像素（修复原白色 bug） */
+/** 单笔触：在「上一采样点 → 当前点」之间画连续轨迹，消除快速拖动的间隙。
+ *  去除 → destination-out 用粗线圆头 stroke 挖透明（线段自然连续）；
+ *  保留 → 沿线段按步长插值出多个圆，逐个 clip + drawImage(原图) 填回真实 RGB
+ *         （clip 不认 lineWidth，故保留模式用插值圆点而非 stroke）。
+ *  起笔（lastBrushPt=null）时退化为单个圆点，保证单击也能落点。 */
 function paintTouchupStroke(e: MouseEvent) {
   const tc = touchupCanvas.value; if (!tc) return
   // 触摸 canvas 带 transform(translate+scale)，用它的 getBoundingClientRect 会把变换算两次导致偏移。
@@ -417,18 +552,42 @@ function paintTouchupStroke(e: MouseEvent) {
   const x = (e.clientX - rect.left - panX.value) / scale.value
   const y = (e.clientY - rect.top - panY.value) / scale.value
   const ctx = tc.getContext('2d')!; const r = touchupBrushSize.value
+  const prev = lastBrushPt
+  lastBrushPt = { x, y }
 
   if (touchupMode.value === 'remove') {
     ctx.globalCompositeOperation = 'destination-out'
-    ctx.fillStyle = '#000'
-    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill()
+    ctx.strokeStyle = '#000'
+    ctx.lineWidth = r * 2
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    ctx.beginPath()
+    if (prev) ctx.moveTo(prev.x, prev.y)
+    else ctx.moveTo(x - r, y) // 单点：配合圆头线帽画出一个实心圆
+    ctx.lineTo(x, y)
+    ctx.stroke()
   } else if (originalCanvas) {
-    // 保留：从离屏原图取像素，恢复真实 RGB（修掉原 #fff 白色 bug）
+    // 保留：沿 prev→cur 插值采样，每个点 clip 圆 + 贴原图像素
     ctx.globalCompositeOperation = 'source-over'
-    ctx.save()
-    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.clip()
-    ctx.drawImage(originalCanvas, 0, 0)
-    ctx.restore()
+    const step = Math.max(1, r / 2) // 步长 = 半径一半，保证相邻圆重叠无间隙
+    const pts: { x: number; y: number }[] = []
+    if (prev) {
+      const dx = x - prev.x, dy = y - prev.y
+      const dist = Math.hypot(dx, dy)
+      const n = Math.max(1, Math.ceil(dist / step))
+      for (let i = 1; i <= n; i++) {
+        const t = i / n
+        pts.push({ x: prev.x + dx * t, y: prev.y + dy * t })
+      }
+    } else {
+      pts.push({ x, y })
+    }
+    for (const p of pts) {
+      ctx.save()
+      ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.clip()
+      ctx.drawImage(originalCanvas, 0, 0)
+      ctx.restore()
+    }
   }
   ctx.globalCompositeOperation = 'source-over'
   schedulePreview()
@@ -443,15 +602,21 @@ function updateBrushCursor(e: MouseEvent) {
   brushCursor.value.visible = true
 }
 
-function endTouchupStroke() { touchupPainting.value = false }
+function endTouchupStroke() {
+  const wasPainting = touchupPainting.value
+  touchupPainting.value = false
+  lastBrushPt = null
+  // 抬手时立即刷新右侧预览图（画笔过程中为省 CPU 不每帧 toDataURL，见 schedulePreview）
+  if (wasPainting) flushPreview()
+}
 
-/** rAF 节流：每帧最多一次 —— 刷新预览 dataURL + 重绘红色保留遮罩 */
+/** rAF 节流：每帧最多一次 —— 仅重绘红色保留遮罩（便宜的 drawImage/fillRect，给实时反馈）。
+ *  右侧预览图（贵的 toDataURL）不再每帧刷新，改在抬手时由 flushPreview() 触发，省 CPU/内存。 */
 function schedulePreview() {
   if (previewRaf) return
   previewRaf = requestAnimationFrame(() => {
     previewRaf = 0
     const tc = touchupCanvas.value
-    if (tc) previewUrl.value = tc.toDataURL('image/png')
     // 红色遮罩：清空 → source-in 方式把修补画布的 alpha 通道「染成半透明红」。
     // 保留区（可见=alpha>0）显红，去除区（透明=alpha=0）无遮罩露出棋盘格。
     const mc = maskCanvas.value
@@ -466,6 +631,12 @@ function schedulePreview() {
       mctx.globalCompositeOperation = 'source-over'
     }
   })
+}
+
+/** 立即刷新右侧预览图（toDataURL 整张画布，较重）。画笔抬手时调一次，避免每帧都做。 */
+function flushPreview() {
+  const tc = touchupCanvas.value
+  if (tc) previewUrl.value = tc.toDataURL('image/png')
 }
 
 
@@ -505,6 +676,37 @@ onMounted(() => document.addEventListener('keydown', onKeydown))
 onUnmounted(() => {
   document.removeEventListener('keydown', onKeydown)
   if (previewRaf) cancelAnimationFrame(previewRaf)
+  // 卸载兜底：防抖计时器还没到就离开，立即落最后一次版本（避免丢编辑）
+  if (autosaveTimer) { clearTimeout(autosaveTimer); autosaveTimer = null; flushAutosave() }
+})
+
+/** 切换吸色态：点吸管按钮进入（target 决定写入哪个颜色），再点一次退出。
+ *  进入时预解码原图到离屏 canvas，供放大镜实时取色（避免每帧 new Image）。 */
+function toggleEyedropper(target: 'bg' | 'stroke') {
+  if (eyedropperTarget.value === target) {
+    // 再点一次 → 退出，释放离屏原图
+    eyedropperTarget.value = null
+    eyedropperSource = null
+    return
+  }
+  if (!image.value) return
+  eyedropperTarget.value = target
+  // 预解码原图到离屏 canvas
+  const img = new Image()
+  img.onload = () => {
+    const c = document.createElement('canvas')
+    c.width = imgNatural.value.w || img.naturalWidth
+    c.height = imgNatural.value.h || img.naturalHeight
+    c.getContext('2d')!.drawImage(img, 0, 0)
+    eyedropperSource = c
+  }
+  img.src = toDataUrl(image.value)
+}
+
+// keep-alive 下路由切走触发 onDeactivated（不触发 onUnmounted），同样兜底
+onDeactivated(() => {
+  if (autosaveTimer) { clearTimeout(autosaveTimer); autosaveTimer = null; flushAutosave() }
+  eyedropperTarget.value = null
 })
 
 // ── 加载抠图模型列表 ──
@@ -574,6 +776,12 @@ onActivated(() => {
 })
 
 // ── 初始化 ──
+// 监听本地 image 变化：用户编辑（裁剪/抠图等经 syncImage）后触发自动保存防抖。
+// 注意 flushAutosave 内部已用 isDirty 把关，外部载入（isDirty=false）不会误存。
+watch(image, () => {
+  if (isDirty.value) scheduleAutosave()
+})
+
 watch(() => workspace.currentImage, (val) => {
   if (val) {
     image.value = val
@@ -597,6 +805,7 @@ async function openFile(file: File) {
   syncImage(await blobToBase64(file))
   isDirty.value = false
   undoStack.value = []; redoStack.value = []
+  touchupSourceB64 = '' // 载入新文件：旧的抠图前快照失效
   return false // 阻止 el-upload 默认上传
 }
 
@@ -628,17 +837,9 @@ async function onDrop(e: DragEvent) {
 async function handleSave() {
   if (!image.value) return
   try {
-    // 有 iconId（图来自历史/生成）→ 存为该图标的编辑版本（工程存档）
-    if (workspace.currentIconId) {
-      const meta = await saveIconVersion(workspace.currentIconId, image.value)
-      isDirty.value = false
-      ElMessage.success(`已存为版本 ${meta.versionNo}`)
-      return
-    }
-    // 无 iconId（本地打开的图）→ 弹对话框存单 PNG（原行为）
+    // 保存 = 用户显式落盘单张 PNG（原图尺寸）；编辑工程由 autosave 自动存版本
     const saved = await savePng(image.value, 'icon.png')
     if (!saved) return // 用户取消
-    isDirty.value = false
     ElMessage.success('已保存')
   } catch (e: any) {
     ElMessage.error('保存失败：' + (e?.message || e))
@@ -655,6 +856,28 @@ async function handleClose() {
   workspace.clear()
   isDirty.value = false
   undoStack.value = []; redoStack.value = []
+  touchupSourceB64 = ''
+}
+
+// ── 自动保存（编辑工程：防抖 3 秒落版本，仅图来自历史/生成页时） ──
+const AUTOSAVE_DEBOUNCE_MS = 3000
+let autosaveTimer: ReturnType<typeof setTimeout> | null = null
+
+/** 立即落一个版本（不弹消息，静默） */
+async function flushAutosave() {
+  if (!image.value || !workspace.currentIconId || !isDirty.value) return
+  try {
+    await saveIconVersion(workspace.currentIconId, image.value, '自动保存')
+    isDirty.value = false
+  } catch (e) {
+    console.warn('自动保存失败：', e)
+  }
+}
+
+function scheduleAutosave() {
+  if (!workspace.currentIconId) return // 本地图无工程，不存
+  if (autosaveTimer) clearTimeout(autosaveTimer)
+  autosaveTimer = setTimeout(flushAutosave, AUTOSAVE_DEBOUNCE_MS)
 }
 
 // ── 智能抠图 ──
@@ -676,6 +899,8 @@ async function handleRemoveBg() {
     })
     console.log('%c[云端抠图开始]', 'color:#409eff;font-weight:bold')
     try {
+      // 抠图前快照：手动修补的「保留笔刷/反选」需贴回真实背景像素
+      touchupSourceB64 = image.value
       syncImage(await removeBackgroundCloud(image.value))
       ElMessage.success('云端抠图完成')
     } catch (e: any) { ElMessage.error(`抠图失败：${e?.message || e}`) } finally {
@@ -709,6 +934,8 @@ async function handleRemoveBg() {
   pushHistory()
   processing.value = true
   try {
+    // 抠图前快照：手动修补的「保留笔刷/反选」需贴回真实背景像素
+    touchupSourceB64 = image.value
     syncImage(await removeBackground(image.value))
     ElMessage.success('智能抠图完成')
   } catch (e: any) { ElMessage.error(`抠图失败：${e?.message || e}`) } finally { processing.value = false }
@@ -816,18 +1043,7 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
         </el-upload>
       </div>
 
-      <div class="top-center undo-redo">
-        <el-button size="small" :disabled="!undoStack.length" @click="undo" title="撤回 Ctrl+Z">
-          <el-icon><RefreshLeft /></el-icon>
-        </el-button>
-        <el-button size="small" :disabled="!redoStack.length" @click="redo" title="重做 Ctrl+Y">
-          <el-icon><RefreshRight /></el-icon>
-        </el-button>
-      </div>
-
       <div class="top-right">
-        <el-button size="small" text @click="fitToCanvas">适应窗口</el-button>
-        <span class="zoom-label">{{ Math.round(scale * 100) }}%</span>
         <el-button size="small" @click="handleSave" :disabled="!image"><el-icon><Download /></el-icon> 保存</el-button>
         <el-button size="small" type="primary" @click="router.push('/export')" :disabled="!image">去导出</el-button>
         <el-button size="small" @click="handleClose" :disabled="!image"><el-icon><Close /></el-icon> 关闭</el-button>
@@ -931,9 +1147,9 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
             <div class="tt-label">绘画区</div>
           </div>
 
-          <!-- 右：预览区 -->
+          <!-- 右：预览区（与左侧同尺寸逻辑：同 scale/panX，保证左右显示大小一致） -->
           <div class="tt-preview checkerboard">
-            <img v-if="previewUrl" :src="previewUrl" class="preview-img" draggable="false" />
+            <img v-if="previewUrl" :src="previewUrl" class="canvas-img preview-img" :style="{ transform: imageTransform }" draggable="false" />
             <div class="tt-label">预览区</div>
           </div>
         </div>
@@ -944,16 +1160,37 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
         v-else
         ref="canvasRef"
         class="canvas"
-        :class="{ 'canvas-eyedropper': colorActive }"
+        :class="{ 'canvas-eyedropper': eyedropperActive }"
         v-loading="processing"
         @wheel="onCanvasWheel"
         @mousedown="onCanvasMouseDown"
         @mousemove="onCanvasMouseMove"
         @mouseup="onCanvasMouseUp"
-        @mouseleave="onCanvasMouseUp"
+        @mouseenter="eyedropperCursor.visible = true"
+        @mouseleave="() => { eyedropperCursor.visible = false; onCanvasMouseUp() }"
       >
         <div class="canvas-bg checkerboard" />
         <img :src="toDataUrl(image)" class="canvas-img" :style="{ transform: imageTransform, ...shapeClipStyle }" draggable="false" />
+
+        <!-- 吸管光标 + 放大镜（DOM 跟随，比 SVG cursor 丝滑；吸色态且鼠标在画布上时显示） -->
+        <div
+          v-show="eyedropperActive && eyedropperCursor.visible"
+          class="eyedropper-cursor"
+          :style="{ left: eyedropperCursor.x + 'px', top: eyedropperCursor.y + 'px' }"
+        >
+          <svg viewBox="0 0 32 32" width="20" height="20" aria-hidden="true">
+            <path fill="#222" stroke="#fff" stroke-width="1.4" d="M21 3l8 8-3 3-2-2-9 9-4 1-1 4-3-3 4-1 1-4 9-9-2-2z"/>
+          </svg>
+        </div>
+        <!-- 放大镜：鼠标右下方，显示周围像素放大视图 + 中心十字 -->
+        <canvas
+          v-show="eyedropperActive && eyedropperCursor.visible"
+          ref="loupeCanvas"
+          class="loupe"
+          width="72"
+          height="72"
+          :style="{ left: (eyedropperCursor.x + 18) + 'px', top: (eyedropperCursor.y + 18) + 'px' }"
+        ></canvas>
 
         <!-- 形状遮罩九宫格辅助线（跟随图片 transform，帮看构图/圆角对称） -->
         <div v-if="shapeClipActive" class="shape-grid" :style="{ transform: imageTransform, transformOrigin: '0 0', width: imgNatural.w + 'px', height: imgNatural.h + 'px' }">
@@ -971,22 +1208,26 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
             <div class="crop-grid-v" v-for="i in 2" :key="'v'+i" :style="{ left: `${(100/3)*i}%` }" />
           </div>
         </div>
-      </div>
-    </div>
 
+        <!-- 画布右下角浮动缩放控件（美图风格：- 百分比 +，点击百分比适应窗口） -->
+        <div class="zoom-dock" @wheel.prevent="onCanvasWheel">
+          <button class="zoom-btn" @click="zoomBy(0.9)" title="缩小"><el-icon><ZoomOut /></el-icon></button>
+          <span class="zoom-pct" @click="fitToCanvas" title="点击适应窗口">{{ Math.round(scale * 100) }}%</span>
+          <button class="zoom-btn" @click="zoomBy(1.1)" title="放大"><el-icon><ZoomIn /></el-icon></button>
+        </div>
 
-    <!-- 右侧工具配置抽屉（点工具后滑出，不遮罩画布） -->
-    <el-drawer
-      v-model="drawerVisible"
-      :modal="false"
-      :modal-penetrable="true"
-      :trap-focus="false"
-      :with-header="false"
-      direction="rtl"
-      size="300px"
-      :show-close="false"
-    >
-      <div class="drawer-body">
+        <!-- 画布左下角浮动撤销重做（与右下角缩放控件对称） -->
+        <div class="history-dock">
+          <button class="zoom-btn" :disabled="!undoStack.length" @click="undo" title="撤回 Ctrl+Z"><el-icon><RefreshLeft /></el-icon></button>
+          <button class="zoom-btn" :disabled="!redoStack.length" @click="redo" title="重做 Ctrl+Y"><el-icon><RefreshRight /></el-icon></button>
+        </div>
+
+      <!-- 右侧工具配置面板（浮在画布右上角，不挤占画布）。
+           注意：本面板 DOM 上位于 .canvas 内部（绝对定位浮层），故必须阻止
+           mousedown 冒泡，否则拖动滑块会触发画布的 onCanvasMouseDown → isPanning，
+           导致"拖滑块时图片跟着平移"。 -->
+      <div class="tool-panel" v-if="activeTool && activeTool !== 'touchup'" @mousedown.stop>
+        <div class="drawer-body">
         <!-- 标题栏 -->
         <div class="drawer-header">
           <span>{{ activeTool ? toolName(activeTool) : '' }}</span>
@@ -1008,9 +1249,16 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
 
         <!-- 去底色 -->
         <div v-else-if="activeTool === 'removeColor'" class="drawer-section">
-          <div class="param">
-            <span class="tool-desc">背景色（点画布拾取，或下方调整）</span>
-            <el-color-picker v-model="bgColor" size="small" style="width:100%; margin-top:4px" />
+          <div class="param color-param">
+            <span class="tool-desc">背景色</span>
+            <el-color-picker v-model="bgColor" size="small" />
+            <el-button
+              class="eyedrop-toggle"
+              :class="{ active: eyedropperTarget === 'bg' }"
+              size="small"
+              title="点画布吸色（再点关闭）"
+              @click="toggleEyedropper('bg')"
+            ><el-icon><Aim /></el-icon></el-button>
           </div>
           <div class="param">
             <span class="tool-desc">容差：{{ colorTolerance }}</span>
@@ -1020,7 +1268,6 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
             <el-button type="primary" @click="applyRemoveColor" :loading="processing" style="flex:1">应用</el-button>
             <el-button @click="cancelRemoveColor" style="flex:1">取消</el-button>
           </div>
-          <p class="tool-desc">直接在画布上点击要去除的颜色（吸管），适合白底图标</p>
         </div>
 
         <!-- 抠图 -->
@@ -1096,12 +1343,19 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
             <span class="tool-desc">羽化半径：{{ featherAmount }}</span>
             <el-slider v-model="featherAmount" :min="0.5" :max="4" :step="0.1" size="small" />
           </div>
-          <div class="param">
+          <div class="param color-param">
             <span class="tool-desc">内描边颜色</span>
-            <el-color-picker v-model="strokeColor" size="small" style="width:100%; margin-top:4px" />
+            <el-color-picker v-model="strokeColor" size="small" />
+            <el-button
+              class="eyedrop-toggle"
+              :class="{ active: eyedropperTarget === 'stroke' }"
+              size="small"
+              title="点画布吸色（再点关闭）"
+              @click="toggleEyedropper('stroke')"
+            ><el-icon><Aim /></el-icon></el-button>
           </div>
           <el-divider />
-          <div class="btn-row" style="flex-wrap:wrap">
+          <div class="btn-row btn-grid-2">
             <el-button size="small" :disabled="processing || !image" @click="handleEdgeRefine('erode')">收缩</el-button>
             <el-button size="small" :disabled="processing || !image" @click="handleEdgeRefine('feather')">羽化</el-button>
             <el-button size="small" :disabled="processing || !image" @click="handleEdgeRefine('decontaminate')">去色晕</el-button>
@@ -1140,8 +1394,10 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
             应用调色
           </el-button>
         </div>
+        </div>
       </div>
-    </el-drawer>
+      </div>
+    </div>
 
     <!-- 拖拽遮罩 -->
     <div v-if="dragOver && image" class="drop-overlay">
@@ -1169,12 +1425,7 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
 .top-bar {
   display: flex; align-items: center; margin-bottom: 8px; flex-shrink: 0; gap: 8px;
 }
-.top-left { display: flex; gap: 4px; }
-.top-center { flex: 1; display: flex; justify-content: center; }
-.undo-redo { gap: 0; }
-.undo-redo .el-button { border-radius: 4px; margin-left: 0; }
-.undo-redo .el-button + .el-button { border-left: 1px solid var(--el-border-color); border-top-left-radius: 0; border-bottom-left-radius: 0; }
-.undo-redo .el-button:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.top-left { display: flex; gap: 4px; flex: 1; }
 .top-right { display: flex; gap: 4px; align-items: center; }
 
 .empty-state { flex: 1; display: flex; align-items: center; justify-content: center; }
@@ -1208,7 +1459,23 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
   cursor: grab; min-width: 0;
 }
 .canvas:active { cursor: grabbing; }
-.canvas-eyedropper, .canvas-eyedropper:active { cursor: crosshair; }
+/* 吸色模式：隐藏系统光标，用 DOM 吸管元素跟随（比 SVG cursor 丝滑） */
+.canvas-eyedropper, .canvas-eyedropper:active { cursor: none; }
+/* 吸管光标：绝对定位跟随鼠标，尖端对准鼠标点 */
+.eyedropper-cursor {
+  position: absolute; pointer-events: none; z-index: 20;
+  transform: translate(-2px, -18px);
+  will-change: left, top;
+}
+/* 放大镜：鼠标右下方，带边框阴影，关闭抗锯齿由 JS imageSmoothingEnabled 控制 */
+.loupe {
+  position: absolute; pointer-events: none; z-index: 21;
+  border: 1px solid var(--el-border-color);
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  image-rendering: pixelated;
+  will-change: left, top;
+}
 .canvas-bg { position: absolute; inset: 0; }
 
 .canvas-img { position: absolute; top: 0; left: 0; transform-origin: 0 0; z-index: 2; }
@@ -1280,15 +1547,15 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
   background: var(--el-color-success-light-9);
 }
 
-/* 画布左右分区：左绘画 / 右预览 */
+/* 画布左右分区：左绘画 / 右预览（两者同 flex、同无边距，保证可用区一致） */
 .touchup-canvas-area { flex: 1; display: flex; gap: 12px; min-height: 0; }
 .tt-paint { flex: 1; min-width: 0; }
 .tt-preview {
   flex: 1; min-width: 0; position: relative; border-radius: 6px; overflow: hidden;
-  display: flex; align-items: center; justify-content: center; padding: 8px;
 }
+/* 预览图复用 .canvas-img 的绝对定位+transform-origin，叠加 imageTransform，
+   与左侧绘画区用同一套 scale/panX，显示大小逐像素一致 */
 .tt-preview .preview-img {
-  max-width: 100%; max-height: 100%; object-fit: contain;
   -webkit-user-drag: none; user-select: none;
 }
 /* 分区角标 */
@@ -1305,7 +1572,41 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
   image-rendering: auto;
 }
 
-.zoom-label { font-size: 12px; color: var(--el-text-color-secondary); min-width: 36px; text-align: center; }
+/* 画布右下角浮动缩放控件（美图风格胶囊条） */
+.zoom-dock {
+  position: absolute; right: 12px; bottom: 12px; z-index: 30;
+  display: flex; align-items: center; gap: 2px;
+  padding: 3px; border-radius: 8px;
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-light);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  user-select: none;
+}
+.zoom-btn {
+  width: 26px; height: 26px; border-radius: 5px; border: none;
+  background: transparent; cursor: pointer; color: var(--el-text-color-regular);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 14px; transition: background 0.15s;
+}
+.zoom-btn:hover { background: var(--el-fill-color-light); color: var(--el-color-primary); }
+.zoom-pct {
+  min-width: 46px; text-align: center; cursor: pointer;
+  font-size: 12px; color: var(--el-text-color-primary); padding: 0 2px;
+}
+.zoom-pct:hover { color: var(--el-color-primary); }
+.zoom-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.zoom-btn:disabled:hover { background: transparent; color: var(--el-text-color-regular); }
+
+/* 画布左下角浮动撤销重做（复用 .zoom-dock/.zoom-btn 视觉） */
+.history-dock {
+  position: absolute; left: 12px; bottom: 12px; z-index: 30;
+  display: flex; align-items: center; gap: 2px;
+  padding: 3px; border-radius: 8px;
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-light);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  user-select: none;
+}
 
 /* 左侧工具栏（PS 风格竖条） */
 .tool-rail {
@@ -1336,7 +1637,28 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
 
 .tool-desc { font-size: 12px; color: var(--el-text-color-secondary); margin: 6px 0 0; }
 .btn-row { display: flex; gap: 6px; margin-top: 4px; }
+/* 4 按钮两列等宽网格：每个占一半（减去 gap 一半），自动换行成 2×2，宽度整齐 */
+.btn-grid-2 { flex-wrap: wrap; }
+.btn-grid-2 > .el-button { flex: 1 0 calc(50% - 3px); margin-left: 0; }
+/* 内描边颜色：标签 + 小色块横向并排（色块不拉宽），触发器手型光标 */
+.color-param { display: flex; align-items: center; gap: 8px; }
+.color-param .tool-desc { margin: 0; }
+.color-param :deep(.el-color-picker__trigger) { cursor: pointer; }
+/* 吸色切换按钮：紧凑图标，激活时高亮 */
+.eyedrop-toggle { flex-shrink: 0; padding: 0 8px; }
+.eyedrop-toggle.active { color: var(--el-color-primary); border-color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
 .param { margin-bottom: 12px; }
+
+/* 右侧参数浮层（浮在画布右上角，不挤占画布，画布尺寸不变图片不偏移） */
+.tool-panel {
+  position: absolute; top: 8px; right: 8px; z-index: 15;
+  width: 280px; max-height: calc(100% - 16px);
+  background: var(--el-bg-color);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  overflow-y: auto;
+}
 
 /* Drawer 内容 */
 .drawer-body { padding: 16px; }
@@ -1345,4 +1667,10 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
   font-size: 15px; font-weight: 600; margin-bottom: 16px;
 }
 .drawer-section { display: flex; flex-direction: column; }
+</style>
+
+<!-- 全局样式：el-color-picker 的 SV 选色面板 teleport 到 body，scoped 选不到，
+     故用非 scoped 块覆盖其十字光标为手型。 -->
+<style>
+.el-color-svpanel { cursor: pointer; }
 </style>
