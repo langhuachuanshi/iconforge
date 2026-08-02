@@ -1,6 +1,6 @@
 [package]
 name = "iconforge"
-version = "0.1.0"
+version = "0.1.1"
 description = "IconForge - AI 图标生成桌面应用"
 authors = ["silas <silas@890625.com>"]
 license = "MIT"
