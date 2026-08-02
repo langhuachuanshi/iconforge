@@ -37,6 +37,8 @@ export interface Template {
   id: string
   name: string
   description: string
+  category: string
+  promptPrefix: string
 }
 
 export interface GenerateParams {
@@ -44,7 +46,9 @@ export interface GenerateParams {
   style: string
   size: string
   provider: string
-  custom_prompt?: string
+  extra?: string
+  negativePrompt?: string
+  seed?: number | null
 }
 
 export interface GenerateResult {
@@ -278,6 +282,7 @@ export interface ProviderEntry {
   model: string
   isBuiltin: boolean
   enabled: boolean
+  supportedSizes: string
 }
 
 export interface ProviderUpsertRequest {
@@ -288,6 +293,7 @@ export interface ProviderUpsertRequest {
   apiKey: string
   endpoint: string
   model?: string
+  supportedSizes?: string
 }
 
 export async function listProviders(): Promise<ProviderEntry[]> {

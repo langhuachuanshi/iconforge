@@ -18,6 +18,9 @@ pub struct Template {
     pub id: String,
     pub name: String,
     pub description: String,
+    pub category: String,
+    /// 提示词前缀（含 {concept} 占位符），前端用于实时预览最终 prompt
+    pub prompt_prefix: String,
 }
 
 /// 图标生成请求
@@ -37,6 +40,12 @@ pub struct GenerateRequest {
     /// 额外指令，追加到模板提示词末尾（可选）
     #[serde(default)]
     pub extra: Option<String>,
+    /// 负向提示词：不希望出现的内容（可选）
+    #[serde(default)]
+    pub negative_prompt: Option<String>,
+    /// 随机种子，同 seed 重出相似图（可选）
+    #[serde(default)]
+    pub seed: Option<i64>,
 }
 
 fn default_style() -> String {
@@ -240,6 +249,8 @@ pub struct ProviderEntry {
     pub model: String,
     pub is_builtin: bool,
     pub enabled: bool,
+    /// 逗号分隔的尺寸列表，如 "1024x1024,720x1280"
+    pub supported_sizes: String,
 }
 
 /// 抠图模型下载进度
@@ -277,6 +288,9 @@ pub struct ProviderUpsertRequest {
     pub endpoint: String,
     #[serde(default)]
     pub model: String,
+    /// 支持尺寸，逗号分隔（可选，默认 1024x1024）
+    #[serde(default)]
+    pub supported_sizes: Option<String>,
 }
 
 /// 历史列表响应

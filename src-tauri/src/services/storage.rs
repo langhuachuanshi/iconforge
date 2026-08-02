@@ -57,6 +57,7 @@ const MIGRATE_SQL: &str = "
 ALTER TABLE providers ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE providers ADD COLUMN model TEXT NOT NULL DEFAULT '';
 ALTER TABLE providers ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE providers ADD COLUMN supported_sizes TEXT NOT NULL DEFAULT '1024x1024';
 ";
 
 /// SQLite + 文件系统持久化层
@@ -408,16 +409,16 @@ impl Storage {
 
         let now = Utc::now().to_rfc3339();
         let defaults = [
-            ("tongyi", "通义万相", "阿里云百炼 通义万象（DashScope）", "https://bailian.console.aliyun.com", "https://dashscope.aliyuncs.com", "wanx2.1-t2i-turbo"),
-            ("doubao", "豆包 Seedream", "字节跳动火山引擎", "https://console.volcengine.com/ark", "https://ark.cn-beijing.volces.com/api/v3/images/generations", "doubao-seedream-2.0"),
-            ("cogview", "智谱 CogView", "智谱 AI 开放平台", "https://bigmodel.cn", "https://open.bigmodel.cn/api/paas/v4/images/generations", "cogview-3"),
+            ("tongyi", "通义万相", "阿里云百炼 通义万象（DashScope）", "https://bailian.console.aliyun.com", "https://dashscope.aliyuncs.com", "wanx2.1-t2i-turbo", "1024x1024,720x1280,1280x720"),
+            ("doubao", "豆包 Seedream", "字节跳动火山引擎", "https://console.volcengine.com/ark", "https://ark.cn-beijing.volces.com/api/v3/images/generations", "doubao-seedream-2.0", "1024x1024,1280x720,720x1280"),
+            ("cogview", "智谱 CogView", "智谱 AI 开放平台", "https://bigmodel.cn", "https://open.bigmodel.cn/api/paas/v4/images/generations", "cogview-3", "1024x1024,768x768"),
         ];
 
-        for (idx, (id, name, notes, website, endpoint, model)) in defaults.iter().enumerate() {
+        for (idx, (id, name, notes, website, endpoint, model, sizes)) in defaults.iter().enumerate() {
             conn.execute(
-                "INSERT INTO providers (id, name, notes, website, api_key, endpoint, model, is_builtin, enabled, sort_order, created_at)
-                 VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, 1, 1, ?7, ?8)",
-                rusqlite::params![id, name, notes, website, endpoint, model, idx, now],
+                "INSERT INTO providers (id, name, notes, website, api_key, endpoint, model, is_builtin, enabled, sort_order, created_at, supported_sizes)
+                 VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, 1, 1, ?7, ?8, ?9)",
+                rusqlite::params![id, name, notes, website, endpoint, model, idx, now, sizes],
             )?;
         }
         Ok(())
@@ -427,7 +428,7 @@ impl Storage {
         use crate::models::ProviderEntry;
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, name, notes, website, api_key, endpoint, model, is_builtin, enabled FROM providers ORDER BY sort_order ASC, created_at ASC",
+            "SELECT id, name, notes, website, api_key, endpoint, model, is_builtin, enabled, supported_sizes FROM providers ORDER BY sort_order ASC, created_at ASC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(ProviderEntry {
@@ -440,6 +441,7 @@ impl Storage {
                 model: row.get(6)?,
                 is_builtin: row.get::<_, i32>(7)? != 0,
                 enabled: row.get::<_, i32>(8)? != 0,
+                supported_sizes: row.get(9)?,
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -450,12 +452,13 @@ impl Storage {
         let generated_id = Uuid::new_v4().simple().to_string()[..8].to_string();
         let id = req.id.as_deref().unwrap_or(&generated_id);
         let now = Utc::now().to_rfc3339();
+        let sizes = req.supported_sizes.as_deref().unwrap_or("1024x1024");
         let conn = self.conn.lock();
         let max_order: i32 = conn.query_row("SELECT COALESCE(MAX(sort_order), -1) FROM providers", [], |r| r.get(0))?;
         conn.execute(
-            "INSERT INTO providers (id, name, notes, website, api_key, endpoint, model, is_builtin, enabled, sort_order, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 1, ?8, ?9)",
-            rusqlite::params![id, req.name, req.notes.as_deref().unwrap_or(""), req.website.as_deref().unwrap_or(""), req.api_key, req.endpoint, req.model, max_order + 1, now],
+            "INSERT INTO providers (id, name, notes, website, api_key, endpoint, model, is_builtin, enabled, sort_order, created_at, supported_sizes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 1, ?8, ?9, ?10)",
+            rusqlite::params![id, req.name, req.notes.as_deref().unwrap_or(""), req.website.as_deref().unwrap_or(""), req.api_key, req.endpoint, req.model, max_order + 1, now, sizes],
         )?;
         Ok(ProviderEntry {
             id: id.to_string(),
@@ -467,14 +470,16 @@ impl Storage {
             is_builtin: false,
             enabled: true,
             model: req.model.clone(),
+            supported_sizes: sizes.to_string(),
         })
     }
 
     pub fn update_provider(&self, id: &str, req: &crate::models::ProviderUpsertRequest) -> Result<(), AppError> {
         let conn = self.conn.lock();
+        let sizes = req.supported_sizes.as_deref().unwrap_or("1024x1024");
         let affected = conn.execute(
-            "UPDATE providers SET name=?1, notes=?2, website=?3, api_key=?4, endpoint=?5, model=?6 WHERE id=?7",
-            rusqlite::params![req.name, req.notes.as_deref().unwrap_or(""), req.website.as_deref().unwrap_or(""), req.api_key, req.endpoint, req.model, id],
+            "UPDATE providers SET name=?1, notes=?2, website=?3, api_key=?4, endpoint=?5, model=?6, supported_sizes=?7 WHERE id=?8",
+            rusqlite::params![req.name, req.notes.as_deref().unwrap_or(""), req.website.as_deref().unwrap_or(""), req.api_key, req.endpoint, req.model, sizes, id],
         )?;
         if affected == 0 {
             return Err(AppError::NotFound(format!("服务商 {} 不存在", id)));

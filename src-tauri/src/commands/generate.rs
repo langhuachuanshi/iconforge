@@ -19,10 +19,20 @@ pub async fn get_providers(state: State<'_, AppState>) -> Result<Vec<ProviderInf
             name: p.name.clone(),
             display_name: p.name.clone(),
             config_key: p.id.clone(),
-            supported_sizes: vec!["1024x1024".into()],
+            supported_sizes: parse_supported_sizes(&p.supported_sizes),
             configured: !p.api_key.is_empty(),
         })
         .collect())
+}
+
+/// 把 "1024x1024,720x1280" 解析成 Vec，空则回退默认
+fn parse_supported_sizes(s: &str) -> Vec<String> {
+    let v: Vec<String> = s
+        .split(',')
+        .map(|x| x.trim().to_string())
+        .filter(|x| !x.is_empty())
+        .collect();
+    if v.is_empty() { vec!["1024x1024".into()] } else { v }
 }
 
 /// 获取提示词风格模板列表
@@ -34,6 +44,8 @@ pub fn get_templates() -> Vec<Template> {
             id: t.id.to_string(),
             name: t.name.to_string(),
             description: t.description.to_string(),
+            category: t.category.to_string(),
+            prompt_prefix: t.prompt_prefix.to_string(),
         })
         .collect()
 }
@@ -76,7 +88,13 @@ pub async fn generate_icon(
     // 3. 调用 OpenAI 兼容 API
     log::info!("[生成] 服务商={} endpoint={} model={} size={}", config.name, config.endpoint, config.model, req.size);
     log::info!("[生成] prompt={}", &prompt[..prompt.len().min(200)]);
-    let result = OpenAiProvider::generate(&config, &prompt, &req.size).await?;
+    let result = OpenAiProvider::generate(
+        &config,
+        &prompt,
+        &req.size,
+        req.negative_prompt.as_deref(),
+        req.seed,
+    ).await?;
 
     // 4. 保存到历史
     let meta = {

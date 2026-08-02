@@ -20,6 +20,8 @@ impl OpenAiProvider {
         config: &ProviderEntry,
         prompt: &str,
         size: &str,
+        negative_prompt: Option<&str>,
+        seed: Option<i64>,
     ) -> Result<GenerateResult, AppError> {
         let api_key = config.api_key.trim();
         if api_key.is_empty() {
@@ -31,13 +33,13 @@ impl OpenAiProvider {
 
         // 自动检测协议：maas → DashScope 异步，dashscope → DashScope 异步，其他 → OpenAI 兼容
         if config.endpoint.contains("maas") {
-            return Self::generate_dashscope_maas(config, prompt, size, api_key).await;
+            return Self::generate_dashscope_maas(config, prompt, size, negative_prompt, seed, api_key).await;
         }
         if config.endpoint.contains("dashscope") {
-            return Self::generate_dashscope(config, prompt, size, api_key).await;
+            return Self::generate_dashscope(config, prompt, size, negative_prompt, seed, api_key).await;
         }
 
-        Self::generate_openai(config, prompt, size, api_key).await
+        Self::generate_openai(config, prompt, size, negative_prompt, seed, api_key).await
     }
 
     /// OpenAI 兼容格式
@@ -45,19 +47,41 @@ impl OpenAiProvider {
         config: &ProviderEntry,
         prompt: &str,
         size: &str,
+        negative_prompt: Option<&str>,
+        seed: Option<i64>,
         api_key: &str,
     ) -> Result<GenerateResult, AppError> {
         let client = Client::builder().timeout(Duration::from_secs(120)).build()?;
         let url = config.endpoint.trim();
         let model = if config.model.is_empty() { "default" } else { config.model.as_str() };
 
-        let body = serde_json::json!({
+        // CogView（智谱）官方 images/generations 接口不支持 negative_prompt / seed 字段：
+        // 负向词降级拼进主 prompt，seed 直接忽略（官方未暴露，传了可能报错）。
+        let is_cogview = config.endpoint.contains("bigmodel");
+        let final_prompt = if is_cogview {
+            match negative_prompt.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                Some(neg) => format!("{}. Avoid: {}", prompt, neg),
+                None => prompt.to_string(),
+            }
+        } else {
+            prompt.to_string()
+        };
+
+        let mut body = serde_json::json!({
             "model": model,
-            "prompt": prompt,
+            "prompt": final_prompt,
             "n": 1,
             "size": size,
             "response_format": "b64_json"
         });
+        if !is_cogview {
+            if let Some(neg) = negative_prompt.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                body["negative_prompt"] = serde_json::Value::String(neg.into());
+            }
+            if let Some(s) = seed {
+                body["seed"] = serde_json::Value::Number(serde_json::Number::from(s));
+            }
+        }
 
         log::info!("[OpenAI] POST {} model={}", url, model);
 
@@ -100,6 +124,8 @@ impl OpenAiProvider {
         config: &ProviderEntry,
         prompt: &str,
         size: &str,
+        negative_prompt: Option<&str>,
+        seed: Option<i64>,
         api_key: &str,
     ) -> Result<GenerateResult, AppError> {
         let client = Client::builder().timeout(Duration::from_secs(120)).build()?;
@@ -107,12 +133,20 @@ impl OpenAiProvider {
         let url = format!("{}/api/v1/services/aigc/multimodal-generation/generation", config.endpoint.trim_end_matches('/'));
         let maas_size = size.replace('x', "*");
 
+        let mut params = serde_json::json!({ "size": maas_size });
+        if let Some(neg) = negative_prompt.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            params["negative_prompt"] = serde_json::Value::String(neg.into());
+        }
+        if let Some(s) = seed {
+            params["seed"] = serde_json::Value::Number(serde_json::Number::from(s));
+        }
+
         let body = serde_json::json!({
             "model": model,
             "input": {
                 "messages": [{"role": "user", "content": [{"text": prompt}]}]
             },
-            "parameters": {"size": maas_size}
+            "parameters": params
         });
 
         log::info!("[MaaS] POST {} model={}", url, model);
@@ -153,18 +187,28 @@ impl OpenAiProvider {
         config: &ProviderEntry,
         prompt: &str,
         size: &str,
+        negative_prompt: Option<&str>,
+        seed: Option<i64>,
         api_key: &str,
     ) -> Result<GenerateResult, AppError> {
         let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
         let model = if config.model.is_empty() { "qwen-image-2.0-pro" } else { config.model.as_str() };
         let ds_size = size.replace('x', "*");
 
+        let mut params = serde_json::json!({ "size": ds_size, "n": 1 });
+        if let Some(neg) = negative_prompt.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            params["negative_prompt"] = serde_json::Value::String(neg.into());
+        }
+        if let Some(s) = seed {
+            params["seed"] = serde_json::Value::Number(serde_json::Number::from(s));
+        }
+
         // 1. 提交任务
         let submit_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis";
         let body = serde_json::json!({
             "model": model,
             "input": { "prompt": prompt },
-            "parameters": { "size": ds_size, "n": 1 }
+            "parameters": params
         });
 
         log::info!("[DashScope] POST {} model={}", submit_url, model);

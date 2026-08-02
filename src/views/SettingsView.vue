@@ -49,6 +49,7 @@ const form = ref<ProviderUpsertRequest>({
   apiKey: '',
   endpoint: '',
   model: '',
+  supportedSizes: '1024x1024',
 })
 const editingId = ref<string | null>(null)
 
@@ -146,7 +147,7 @@ async function onRowMouseUp() {
 function openAdd() {
   editingId.value = null
   dialogTitle.value = '新增服务商'
-  form.value = { name: '', notes: '', website: '', apiKey: '', endpoint: '', model: '' }
+  form.value = { name: '', notes: '', website: '', apiKey: '', endpoint: '', model: '', supportedSizes: '1024x1024' }
   dialogVisible.value = true
 }
 
@@ -160,6 +161,7 @@ function openEdit(row: ProviderEntry) {
     apiKey: row.apiKey,
     endpoint: row.endpoint,
     model: row.model,
+    supportedSizes: row.supportedSizes || '1024x1024',
   }
   dialogVisible.value = true
 }
@@ -498,6 +500,10 @@ async function openLocation(id: string) {
         </el-form-item>
         <el-form-item label="模型" prop="model">
           <el-input v-model="form.model" placeholder="例如：qwen-image-2.0-pro" />
+        </el-form-item>
+        <el-form-item label="支持尺寸" prop="supportedSizes">
+          <el-input v-model="form.supportedSizes" placeholder="1024x1024,720x1280" />
+          <span class="tool-desc">用英文逗号分隔多个尺寸，生成页将可选</span>
         </el-form-item>
         <el-form-item label="请求地址" prop="endpoint">
           <el-input v-model="form.endpoint" placeholder="https://api.example.com/v1/images/generations" />
