@@ -57,6 +57,31 @@ async function onFilePicked(file: File) {
   return false // 阻止默认上传
 }
 
+// ── 拖拽添加图片 ──
+const dragOver = ref(false)
+
+function onDragEnter(e: DragEvent) {
+  if (!e.dataTransfer?.types.includes('Files')) return
+  e.preventDefault()
+  dragOver.value = true
+}
+function onDragOver(e: DragEvent) {
+  if (!e.dataTransfer?.types.includes('Files')) return
+  e.preventDefault()
+  e.dataTransfer.dropEffect = 'copy'
+}
+function onDragLeave(e: DragEvent) {
+  if (e.relatedTarget === null) dragOver.value = false
+}
+async function onDrop(e: DragEvent) {
+  e.preventDefault()
+  dragOver.value = false
+  const files = Array.from(e.dataTransfer?.files ?? []).filter((f) => f.type.startsWith('image/'))
+  if (files.length === 0) return
+  for (const f of files) await onFilePicked(f)
+  ElMessage.success(`已添加 ${files.length} 张图片`)
+}
+
 function removeImage(idx: number) {
   images.value.splice(idx, 1)
 }
@@ -96,7 +121,14 @@ async function handleExport() {
 </script>
 
 <template>
-  <div class="export-root">
+  <div
+    class="export-root"
+    :class="{ 'drag-active': dragOver }"
+    @dragenter="onDragEnter"
+    @dragover="onDragOver"
+    @dragleave="onDragLeave"
+    @drop="onDrop"
+  >
     <div class="header-row">
       <h2 class="page-title">导出图标</h2>
       <div class="header-actions">
@@ -165,11 +197,28 @@ async function handleExport() {
         </el-button>
       </el-form>
     </el-card>
+
+    <!-- 拖拽遮罩 -->
+    <div v-if="dragOver" class="drop-overlay">
+      <el-icon :size="48"><UploadFilled /></el-icon>
+      <p>松开以添加图片</p>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.export-root { display: flex; flex-direction: column; height: calc(100vh - 110px); }
+.export-root { display: flex; flex-direction: column; height: calc(100vh - 110px); position: relative; }
+
+/* 拖拽高亮 */
+.export-root.drag-active > *:not(.drop-overlay) { filter: brightness(0.6); }
+.drop-overlay {
+  position: absolute; inset: 0; z-index: 9999;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: var(--el-color-primary-light-9); color: var(--el-color-primary);
+  border: 3px dashed var(--el-color-primary); border-radius: 6px;
+  pointer-events: none;
+}
+.drop-overlay p { margin-top: 12px; font-size: 18px; font-weight: 600; }
 
 .header-row {
   display: flex; align-items: center; justify-content: space-between;

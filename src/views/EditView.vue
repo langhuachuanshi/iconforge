@@ -493,6 +493,31 @@ async function openFile(file: File) {
   return false // 阻止 el-upload 默认上传
 }
 
+// ── 拖拽打开图片 ──
+const dragOver = ref(false)
+
+function onDragEnter(e: DragEvent) {
+  if (!e.dataTransfer?.types.includes('Files')) return
+  e.preventDefault()
+  dragOver.value = true
+}
+function onDragOver(e: DragEvent) {
+  if (!e.dataTransfer?.types.includes('Files')) return
+  e.preventDefault()
+  e.dataTransfer.dropEffect = 'copy'
+}
+function onDragLeave(e: DragEvent) {
+  // relatedTarget 为 null 表示真正离开窗口/容器，避免子元素间移动误触发
+  if (e.relatedTarget === null) dragOver.value = false
+}
+async function onDrop(e: DragEvent) {
+  e.preventDefault()
+  dragOver.value = false
+  const files = Array.from(e.dataTransfer?.files ?? [])
+  const img = files.find((f) => f.type.startsWith('image/'))
+  if (img) await openFile(img)
+}
+
 async function handleSave() {
   if (!image.value) return
   try {
@@ -672,7 +697,14 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
 </script>
 
 <template>
-  <div class="edit-root">
+  <div
+    class="edit-root"
+    :class="{ 'drag-active': dragOver }"
+    @dragenter="onDragEnter"
+    @dragover="onDragOver"
+    @dragleave="onDragLeave"
+    @drop="onDrop"
+  >
     <!-- 顶部栏 -->
     <div class="top-bar">
       <div class="top-left">
@@ -957,11 +989,28 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
         </div>
       </div>
     </el-drawer>
+
+    <!-- 拖拽遮罩 -->
+    <div v-if="dragOver" class="drop-overlay">
+      <el-icon :size="48"><UploadFilled /></el-icon>
+      <p>松开以打开图片</p>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.edit-root { display: flex; flex-direction: column; height: calc(100vh - 110px); }
+.edit-root { display: flex; flex-direction: column; height: calc(100vh - 110px); position: relative; }
+
+/* 拖拽高亮 */
+.edit-root.drag-active > *:not(.drop-overlay) { filter: brightness(0.6); }
+.drop-overlay {
+  position: absolute; inset: 0; z-index: 9999;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: var(--el-color-primary-light-9); color: var(--el-color-primary);
+  border: 3px dashed var(--el-color-primary); border-radius: 6px;
+  pointer-events: none;
+}
+.drop-overlay p { margin-top: 12px; font-size: 18px; font-weight: 600; }
 
 /* 顶部栏 */
 .top-bar {

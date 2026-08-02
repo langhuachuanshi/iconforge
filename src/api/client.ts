@@ -379,9 +379,14 @@ export interface ExtractedIcon {
   icoBase64: string
 }
 
-/** 从 PE 文件提取所有图标 */
+/** 从 PE 文件提取所有图标（按文件路径） */
 export async function extractIcons(filePath: string): Promise<ExtractedIcon[]> {
   return invoke('extract_icons', { req: { filePath } })
+}
+
+/** 从 PE 文件字节提取所有图标（拖拽场景，传 base64） */
+export async function extractIconsFromBytes(data: string): Promise<ExtractedIcon[]> {
+  return invoke('extract_icons_from_bytes', { req: { data } })
 }
 
 /** 保存单个 ICO 到磁盘（复用后端 save_image_file，它就是写字节） */

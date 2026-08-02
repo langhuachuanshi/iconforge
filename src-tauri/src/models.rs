@@ -303,6 +303,13 @@ pub struct ExtractIconsRequest {
     pub file_path: String,
 }
 
+/// 图标提取请求（拖拽场景）：直接传入 PE 文件字节（base64 编码）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractIconsFromBytesRequest {
+    pub data: String,
+}
+
 /// 提取出的单个图标（每个尺寸一条记录）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

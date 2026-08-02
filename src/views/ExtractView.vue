@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
-import { extractIcons, saveIco, savePng, type ExtractedIcon } from '../api/client'
+import { extractIcons, extractIconsFromBytes, saveIco, savePng, blobToBase64, type ExtractedIcon } from '../api/client'
 
 const icons = ref<ExtractedIcon[]>([])
 const processing = ref(false)
 const filePath = ref('')
+
+const PE_EXTS = ['exe', 'dll', 'ocx', 'cpl']
 
 /** 按组聚合：组名 → 该组所有尺寸条目（用于「导出整组 ICO」去重） */
 const groups = computed(() => {
@@ -59,6 +61,54 @@ async function load() {
   }
 }
 
+// ── 拖拽提取（按字节）──
+const dragOver = ref(false)
+
+function isPeFile(file: File): boolean {
+  const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
+  return PE_EXTS.includes(ext)
+}
+
+function onDragEnter(e: DragEvent) {
+  if (!e.dataTransfer?.types.includes('Files')) return
+  e.preventDefault()
+  dragOver.value = true
+}
+function onDragOver(e: DragEvent) {
+  if (!e.dataTransfer?.types.includes('Files')) return
+  e.preventDefault()
+  e.dataTransfer.dropEffect = 'copy'
+}
+function onDragLeave(e: DragEvent) {
+  if (e.relatedTarget === null) dragOver.value = false
+}
+async function onDrop(e: DragEvent) {
+  e.preventDefault()
+  dragOver.value = false
+  const files = Array.from(e.dataTransfer?.files ?? [])
+  const pe = files.find(isPeFile)
+  if (!pe) {
+    ElMessage.warning('请拖入 .exe / .dll / .ocx 文件')
+    return
+  }
+  processing.value = true
+  try {
+    const b64 = await blobToBase64(pe)
+    icons.value = await extractIconsFromBytes(b64)
+    filePath.value = pe.name
+    if (icons.value.length === 0) {
+      ElMessage.warning('该文件没有图标资源')
+    } else {
+      ElMessage.success(`提取出 ${icons.value.length} 个尺寸`)
+    }
+  } catch (err: any) {
+    ElMessage.error('提取失败：' + (err?.message || err))
+    icons.value = []
+  } finally {
+    processing.value = false
+  }
+}
+
 async function handleExportPng(icon: ExtractedIcon) {
   if (!icon.pngBase64) {
     ElMessage.warning('该尺寸无 PNG 预览')
@@ -83,7 +133,14 @@ async function handleExportGroupIco(groupName: string, sample: ExtractedIcon) {
 </script>
 
 <template>
-  <div class="extract-root">
+  <div
+    class="extract-root"
+    :class="{ 'drag-active': dragOver }"
+    @dragenter="onDragEnter"
+    @dragover="onDragOver"
+    @dragleave="onDragLeave"
+    @drop="onDrop"
+  >
     <div class="header-row">
       <h2 class="page-title">图标提取</h2>
       <div class="header-actions">
@@ -141,11 +198,28 @@ async function handleExportGroupIco(groupName: string, sample: ExtractedIcon) {
         </div>
       </div>
     </div>
+
+    <!-- 拖拽遮罩 -->
+    <div v-if="dragOver" class="drop-overlay">
+      <el-icon :size="48"><UploadFilled /></el-icon>
+      <p>松开以提取图标</p>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.extract-root { display: flex; flex-direction: column; height: calc(100vh - 110px); }
+.extract-root { display: flex; flex-direction: column; height: calc(100vh - 110px); position: relative; }
+
+/* 拖拽高亮 */
+.extract-root.drag-active > *:not(.drop-overlay) { filter: brightness(0.6); }
+.drop-overlay {
+  position: absolute; inset: 0; z-index: 9999;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: var(--el-color-primary-light-9); color: var(--el-color-primary);
+  border: 3px dashed var(--el-color-primary); border-radius: 6px;
+  pointer-events: none;
+}
+.drop-overlay p { margin-top: 12px; font-size: 18px; font-weight: 600; }
 
 .header-row {
   display: flex; align-items: center; justify-content: space-between;
