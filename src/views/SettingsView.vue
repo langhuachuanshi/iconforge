@@ -472,7 +472,6 @@ async function openLocation(id: string) {
 
           <el-divider />
 
-          <p class="about-tech">Tauri 2.x · Vue 3 · Element Plus</p>
           <p class="about-copy">Copyright © 2026 奥哈悠工作室（Silas）</p>
         </div>
       </el-tab-pane>
@@ -662,6 +661,5 @@ async function openLocation(id: string) {
 .about-info .info-row { display: flex; align-items: center; padding: 6px 0; }
 .about-info dt { width: 70px; color: var(--el-text-color-secondary); font-size: 13px; flex-shrink: 0; }
 .about-info dd { margin: 0; font-size: 14px; }
-.about-tech { color: var(--el-text-color-secondary); font-size: 12px; margin: 0; }
 .about-copy { color: var(--el-text-color-placeholder); font-size: 12px; margin: 8px 0 0; }
 </style>

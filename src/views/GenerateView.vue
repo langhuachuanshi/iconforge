@@ -99,7 +99,6 @@ const extraPrompt = ref('')
 const selectedProvider = ref('')
 const selectedSize = ref('1024x1024')
 const negativePrompt = ref('')
-const seedInput = ref<string>('') // 字符串方便留空判断，提交时转数字
 const genCount = ref(1)
 
 const generating = ref(false)
@@ -214,10 +213,9 @@ const extraSegment = computed(() => {
 })
 
 const finalPrompt = computed(() => {
-  // 专家模式：用户输入即最终 prompt（仅追加统一收尾），不走模板/背景/细节拼接
+  // 专家模式：用户输入即最终 prompt，原样发送，不走模板/背景/细节拼接
   if (promptMode.value === 'expert') {
-    const raw = expertPrompt.value.trim() || '...'
-    return `${raw}. Centered composition, professional app icon, readable at small sizes`
+    return expertPrompt.value.trim() || '...'
   }
   // 引导式：模板前缀 + 背景/细节/补充 + 收尾
   const prefix = currentTemplate.value?.promptPrefix?.replace('{concept}', concept.value || '...') ?? ''
@@ -254,7 +252,6 @@ async function handleGenerate() {
     provider: selectedProvider.value,
     extra: isExpert ? undefined : (extraSegment.value || undefined),
     negativePrompt: negativePrompt.value.trim() || undefined,
-    seed: seedInput.value.trim() ? Number(seedInput.value.trim()) : null,
     rawPrompt: isExpert ? expertPrompt.value.trim() : undefined,
   }
 
@@ -327,7 +324,7 @@ function goEdit() {
 }
 
 // ── 复制提示词 ──
-/** 专家式：复制输入框原文（不含自动追加的收尾） */
+/** 专家式：复制输入框原文 */
 function copyExpertPrompt() {
   if (!expertPrompt.value.trim()) {
     ElMessage.warning('提示词为空')
@@ -399,8 +396,8 @@ function copyFullPrompt() {
                     v-model="expertPrompt"
                     type="textarea"
                     :rows="8"
-                    placeholder="直接输入完整英文提示词，例如：&#10;A 3D rendered app icon of a glowing magic cube, neon edges, dark background, cinematic lighting, no text&#10;&#10;（将原样发送，仅自动追加图标质量收尾）"
-                    maxlength="1000"
+                    placeholder="直接输入完整英文提示词，例如：&#10;A 3D rendered app icon of a glowing magic cube, neon edges, dark background, cinematic lighting, no text&#10;&#10;（将原样发送，不做任何修改）"
+                    maxlength="4000"
                     show-word-limit
                   />
                   <el-button class="copy-fab" size="small" @click="copyExpertPrompt" title="复制提示词">
@@ -527,9 +524,6 @@ function copyFullPrompt() {
                 </el-form-item>
                 <el-form-item label="负向提示词">
                   <el-input v-model="negativePrompt" type="textarea" :rows="2" placeholder="不希望出现的内容，如：文字、模糊、变形" maxlength="300" />
-                </el-form-item>
-                <el-form-item label="随机种子">
-                  <el-input v-model="seedInput" placeholder="留空=随机；填数字可复现" />
                 </el-form-item>
               </el-collapse-item>
             </el-collapse>

@@ -74,10 +74,8 @@ pub async fn generate_icon(
     // 1. 组装 prompt
     let prompt = if let Some(raw) = &req.raw_prompt {
         if !raw.trim().is_empty() {
-            // 专家模式：用户直接传完整提示词，跳过模板/概念拼接
-            let mut p = raw.trim().to_string();
-            p.push_str(". Centered composition, professional app icon, readable at small sizes");
-            p
+            // 专家模式：用户直接传完整提示词，原样使用，不追加任何收尾
+            raw.trim().to_string()
         } else {
             assemble_guided_prompt(&req)?
         }

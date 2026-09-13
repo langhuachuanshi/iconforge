@@ -48,7 +48,6 @@ export interface GenerateParams {
   provider: string
   extra?: string
   negativePrompt?: string
-  seed?: number | null
   rawPrompt?: string
 }
 
