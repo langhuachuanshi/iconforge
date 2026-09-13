@@ -12,6 +12,7 @@ import {
 } from '../api/client'
 import { useWorkspaceStore } from '../stores/workspace'
 import { copyText } from '../utils/clipboard'
+import { buildMascotPrompt } from '../utils/mascotPrompt'
 
 const router = useRouter()
 const route = useRoute()
@@ -30,46 +31,34 @@ const promptMode = ref<PromptMode>('guide')
 // 专家模式：用户直接输入完整提示词（不经过模板/背景/细节拼接）
 const expertPrompt = ref('')
 
-// ── 吉祥物模式（ip-as-logo skill 移植，规则见 docs/plans/2026-09-14-吉祥物模式.md）──
+// ── 吉祥物模式（ip-as-logo skill 移植，骨架在 utils/mascotPrompt.ts）──
 const mascotSubject = ref('')      // IP 主体
 const mascotFeature = ref('')      // 定义特征（skill 限定最多一个）
 const mascotColorMode = ref<'auto' | 'custom'>('auto') // 三色：AI 自动 / 自定义
 const mascotC1 = ref('#FF8A3D')    // 主色①
 const mascotC2 = ref('#2F6BFF')    // 主色②
 const mascotBg = ref('#F5EFE6')    // 背景色
-const mascotCorner = ref<'both' | 'left' | 'right'>('both') // 出现角落，同时决定张数
+const mascotCorner = ref<'left' | 'right' | 'both'>('both') // 出现角落，左右交替时奇左偶右
 const mascotExtra = ref('')        // 补充描述
 
-/** 按 SKILL.md Prompt skeleton 八段式组装单张提示词（corner 为唯一变量） */
-function buildMascotPrompt(corner: 'lower-left' | 'lower-right'): string {
-  const subject = mascotSubject.value.trim() || 'cute character'
-  const feature = mascotFeature.value.trim()
-  const custom = mascotColorMode.value === 'custom'
-  const bgDesc = custom ? `solid ${mascotBg.value}` : 'a gently muted, clearly chromatic solid color chosen to suit the character'
-  const colorLine = custom
-    ? `Use ${mascotC1.value} and ${mascotC2.value} as the two IP base colors`
-    : 'Choose the two IP colors from the subject and context'
-  const extra = mascotExtra.value.trim()
-  return [
-    'Create one complete full-bleed 1:1 square image.',
-    `Background: fill the entire square with ${bgDesc}. Keep this background visible in every open area and in the corners not occupied by the character; the ${corner} corner must be occupied by the character.`,
-    `Subject: place one extremely simplified, cute, endearing ${subject} IP character on the background, reduced to one soft rounded continuous silhouette and one defining feature${feature ? ` (${feature})` : ''}.`,
-    'Complexity: use only 4-7 large basic shapes and at most two broad internal color regions. Use two simple eyes and add one tiny mouth only when it helps the expression. Remove every nonessential line, outline, anatomical detail, texture, and decoration. Keep the character readable at 32 x 32.',
-    `Color behavior: use exactly three semantic colors in the complete image: exactly two IP base colors plus the background color. ${colorLine}, organize both into broad purposeful masses, and reuse them for facial marks. Keep the IP, facial marks, and background clearly separated.`,
-    `Composition: keep the character upright and emerging from the ${corner} corner, filling about 85-95% of the square so it remains visually dominant. Cropping at the bottom or assigned side is welcome when it strengthens the corner emergence. Preserve both paired identifying features. Never center or bottom-center the character.`,
-    'Style: make simplification, cuteness, and lovable baby-like appeal the strongest qualities. Use large soft forms, compact proportions, thick rounded contours, and an ultra-clean graphic treatment. Prefer one clear shape over several explanatory details. Add an extremely, extremely subtle, almost imperceptible sense of depth through a barely-there neo-skeuomorphic treatment.',
-    'Finish: show only the character on the full-canvas background, with clean surfaces and normal square outer corners.',
-    ...(extra ? [`Additional notes: ${extra}.`] : []),
-    'Constraints: Use no text or watermark. Add no borders, frames, cards, or presentation masks. Include one character only, with no extra subjects or scenery. Use no fragile lines, sharp tips, unnecessary outlines, tiny details, or decorative marks. Add no photorealistic material, dramatic bevel, glossy hotspot, deep occlusion, extrusion, strong three-dimensional rendering, or external cast shadow. Keep the background solid and uniform, with no texture, vignette, or lighting variation.',
-  ].join('\n')
-}
-
-// 奇数张左下、偶数张右下（skill 默认批次三张左下三张右下）
+// 候选提示词：张数与其他模式统一走 genCount（1-2 张），角落为批量内唯一变量
 const mascotPrompts = computed<string[]>(() => {
-  const mode = mascotCorner.value
-  if (mode === 'left') return [1, 2, 3].map(() => buildMascotPrompt('lower-left'))
-  if (mode === 'right') return [1, 2, 3].map(() => buildMascotPrompt('lower-right'))
-  return [1, 2, 3, 4, 5, 6].map((i) => buildMascotPrompt(i % 2 === 1 ? 'lower-left' : 'lower-right'))
+  const params = {
+    subject: mascotSubject.value.trim(),
+    feature: mascotFeature.value.trim() || undefined,
+    colorMode: mascotColorMode.value,
+    color1: mascotC1.value,
+    color2: mascotC2.value,
+    bgColor: mascotBg.value,
+    extra: mascotExtra.value.trim() || undefined,
+  }
+  const n = Math.min(Math.max(genCount.value, 1), 2)
+  return Array.from({ length: n }, (_, i) => {
+    const corner = mascotCorner.value === 'both'
+      ? (i % 2 === 0 ? 'lower-left' : 'lower-right')
+      : (mascotCorner.value === 'left' ? 'lower-left' : 'lower-right')
+    return buildMascotPrompt(params, corner)
+  })
 })
 
 // ── 背景可视化 ──
@@ -137,7 +126,7 @@ const advancedNames = ref<string[]>([])
 // ── 补充指令（进阶自由文本）──
 const extraPrompt = ref('')
 
-// ── 高级设置 ──
+// ── 其他配置（三模式共用）──
 const selectedProvider = ref('')
 const selectedSize = ref('1024x1024')
 const negativePrompt = ref('')
@@ -221,16 +210,14 @@ const genBtnText = computed(() => {
   const t = elapsedSec.value > 0 ? ` ${elapsedSec.value}s` : ''
   return genTotal.value > 1 ? `生成中 ${genCurrent.value}/${genTotal.value}...${t}` : `生成中...${t}`
 })
-// 空闲态按钮文案：吉祥物张数由角落选择决定
-const genBtnIdleText = computed(() => {
-  if (promptMode.value === 'mascot') return `生成 ${mascotPrompts.value.length} 张`
-  return genCount.value > 1 ? `生成 ${genCount.value} 张` : '生成'
+// 空闲态按钮文案（三模式统一，张数都来自 genCount）
+const genBtnIdleText = computed(() => (genCount.value > 1 ? `生成 ${genCount.value} 张` : '生成'))
+
+// 当前模式用于记录/工作区的 concept：专家式无 concept，吉祥物用主体，引导式用概念
+const currentConcept = computed(() => {
+  if (promptMode.value === 'expert') return ''
+  return promptMode.value === 'mascot' ? mascotSubject.value.trim() : concept.value.trim()
 })
-const modeHintText = computed(() => ({
-  guide: '点选配置',
-  mascot: '三色 · 角落构图 · 批量候选',
-  expert: '直接输入完整提示词',
-}[promptMode.value]))
 
 // 切换服务商时重置尺寸到该服务商第一档
 watch(selectedProvider, () => {
@@ -304,7 +291,7 @@ async function handleGenerate() {
 
   const isExpert = promptMode.value === 'expert'
   const isMascot = promptMode.value === 'mascot'
-  // 吉祥物：逐张提示词（角落交替）；张数由角落选择决定，不走通用生成数量
+  // 吉祥物：逐张提示词（角落交替）；张数与其他模式统一由 genCount 决定
   const mascotList = isMascot ? mascotPrompts.value : null
   const baseParams = {
     concept: isMascot ? mascotSubject.value : (isExpert ? '' : concept.value),
@@ -312,7 +299,8 @@ async function handleGenerate() {
     size: selectedSize.value,
     provider: selectedProvider.value,
     extra: isExpert || isMascot ? undefined : (extraSegment.value || undefined),
-    negativePrompt: negativePrompt.value.trim() || undefined,
+    // 负向提示词仅引导式/吉祥物有入口；专家式自管完整提示词
+    negativePrompt: isExpert ? undefined : (negativePrompt.value.trim() || undefined),
     rawPrompt: isMascot ? mascotList![0] : (isExpert ? expertPrompt.value.trim() : undefined),
   }
 
@@ -348,9 +336,8 @@ async function handleGenerate() {
       try {
         const r = await generateWithRetry(mascotList ? { ...baseParams, rawPrompt: mascotList[i] } : baseParams)
         results.value.push(r)
-        // 第一张作为 workspace 主图（去编辑用）；concept 仅引导式/吉祥物有，专家式留空
-        const conceptForRecord = isMascot ? mascotSubject.value.trim() : (isExpert ? '' : concept.value.trim())
-        if (results.value.length === 1) workspace.setImage(r.b64, r.iconId, conceptForRecord)
+        // 第一张作为 workspace 主图（去编辑用）
+        if (results.value.length === 1) workspace.setImage(r.b64, r.iconId, currentConcept.value)
       } catch (e) {
         fail++
         console.error(`[生成] 第 ${i + 1} 张失败:`, e)
@@ -377,8 +364,7 @@ function useResult(idx: number) {
   if (!r) return
   selectedIdx.value = idx
   // 同一批结果 concept 相同；保留当前 concept，iconId 用所选结果
-  const conceptForRecord = promptMode.value === 'expert' ? '' : (promptMode.value === 'mascot' ? mascotSubject.value.trim() : concept.value.trim())
-  workspace.setImage(r.b64, r.iconId, conceptForRecord)
+  workspace.setImage(r.b64, r.iconId, currentConcept.value)
 }
 
 function goEdit() {
@@ -396,7 +382,7 @@ function copyExpertPrompt() {
   copyText(expertPrompt.value.trim(), '已复制提示词')
 }
 
-/** 引导式 / 结果区：复制拼装后的完整提示词 */
+/** 引导式 / 吉祥物：复制当前预览的完整提示词（吉祥物为第一张，各张仅角落不同） */
 function copyFullPrompt() {
   copyText(finalPrompt.value, '已复制提示词')
 }
@@ -418,7 +404,7 @@ function copyFullPrompt() {
         </div>
 
         <!-- 多图网格：每个格子 1:1 -->
-        <div v-else-if="results.length > 1" class="result-grid" :class="`cols-${Math.min(results.length, 6)}`">
+        <div v-else-if="results.length > 1" class="result-grid" :class="`cols-${Math.min(results.length, 4)}`">
           <div
             v-for="(r, idx) in results"
             :key="idx"
@@ -449,7 +435,7 @@ function copyFullPrompt() {
                 <el-radio-button value="mascot">吉祥物</el-radio-button>
                 <el-radio-button value="expert">专家式</el-radio-button>
               </el-radio-group>
-              <span class="mode-hint">{{ modeHintText }}</span>
+              <span v-if="promptMode === 'guide'" class="mode-hint">点选配置</span>
             </div>
 
             <!-- 吉祥物模式：ip-as-logo skill 参数化 -->
@@ -480,18 +466,23 @@ function copyFullPrompt() {
                 </div>
               </el-form-item>
 
-              <div class="step"><span class="step-num">4</span> 出现角落与张数</div>
+              <div class="step"><span class="step-num">4</span> 出现角落</div>
               <el-form-item>
-                <el-radio-group v-model="mascotCorner" size="small">
-                  <el-radio-button value="both">左右各半 · 6 张</el-radio-button>
-                  <el-radio-button value="left">仅左下 · 3 张</el-radio-button>
-                  <el-radio-button value="right">仅右下 · 3 张</el-radio-button>
-                </el-radio-group>
+                <el-select v-model="mascotCorner" style="width:100%">
+                  <el-option value="both" label="左右交替（多张时奇左偶右）" />
+                  <el-option value="left" label="左下探出" />
+                  <el-option value="right" label="右下探出" />
+                </el-select>
               </el-form-item>
 
               <div class="step"><span class="step-num">5</span> 补充 <span class="label-hint">— 可选</span></div>
               <el-form-item>
                 <el-input v-model="mascotExtra" type="textarea" :rows="2" placeholder="还想补充什么？例如：气质更安静一点、腮红明显一点…" maxlength="300" />
+              </el-form-item>
+
+              <div class="step"><span class="step-num">6</span> 负向提示词 <span class="label-hint">— 可选</span></div>
+              <el-form-item>
+                <el-input v-model="negativePrompt" type="textarea" :rows="2" placeholder="不希望出现的内容，如：文字、模糊、变形" maxlength="300" />
               </el-form-item>
             </template>
 
@@ -605,11 +596,17 @@ function copyFullPrompt() {
               <el-input v-model="extraPrompt" type="textarea" :rows="2" placeholder="还想补充什么？例如：参考 iOS 18 风格..." maxlength="300" />
             </el-form-item>
 
+            <!-- Step 6: 负向提示词 -->
+            <div class="step"><span class="step-num">6</span> 负向提示词 <span class="label-hint">— 可选</span></div>
+            <el-form-item>
+              <el-input v-model="negativePrompt" type="textarea" :rows="2" placeholder="不希望出现的内容，如：文字、模糊、变形" maxlength="300" />
+            </el-form-item>
+
             </template><!-- /引导式 -->
 
-            <!-- 高级设置（折叠，两种模式共用） -->
+            <!-- 其他配置（折叠，三种模式共用：服务商/尺寸/生成数量） -->
             <el-collapse v-model="advancedNames">
-              <el-collapse-item title="高级设置" name="adv">
+              <el-collapse-item title="其他配置" name="adv">
                 <el-form-item label="AI 服务商">
                   <el-select v-model="selectedProvider" style="width:100%" :key="providers.length">
                     <el-option v-for="p in providers" :key="p.name" :label="p.displayName" :value="p.name">
@@ -623,15 +620,11 @@ function copyFullPrompt() {
                     <el-option v-for="s in sizeOptions" :key="s" :label="s" :value="s" />
                   </el-select>
                 </el-form-item>
-                <!-- 吉祥物模式张数由"出现角落"决定，隐藏通用生成数量 -->
-                <el-form-item v-if="promptMode !== 'mascot'" label="生成数量">
+                <el-form-item label="生成数量">
                   <el-radio-group v-model="genCount" size="small">
                     <el-radio-button :value="1">1 张</el-radio-button>
                     <el-radio-button :value="2">2 张</el-radio-button>
                   </el-radio-group>
-                </el-form-item>
-                <el-form-item label="负向提示词">
-                  <el-input v-model="negativePrompt" type="textarea" :rows="2" placeholder="不希望出现的内容，如：文字、模糊、变形" maxlength="300" />
                 </el-form-item>
               </el-collapse-item>
             </el-collapse>
@@ -645,7 +638,7 @@ function copyFullPrompt() {
                     <el-icon><CopyDocument /></el-icon>
                   </el-button>
                 </div>
-                <p v-if="negativePrompt.trim()" class="neg-preview">负向：{{ negativePrompt.trim() }}</p>
+                <p v-if="promptMode !== 'expert' && negativePrompt.trim()" class="neg-preview">负向：{{ negativePrompt.trim() }}</p>
                 <p v-if="promptMode === 'mascot'" class="neg-preview">
                   共 {{ mascotPrompts.length }} 张候选：{{ mascotCorner === 'both' ? '奇数张左下、偶数张右下，仅出现角落不同' : (mascotCorner === 'left' ? '全部左下探出' : '全部右下探出') }}
                 </p>
@@ -697,8 +690,6 @@ function copyFullPrompt() {
 .result-grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: 100%; }
 .result-grid.cols-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: 100%; }
 .result-grid.cols-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: 100%; }
-/* 5/6 张（吉祥物批次）：三列两行 */
-.result-grid.cols-5, .result-grid.cols-6 { grid-template-columns: repeat(3, minmax(0, 1fr)); max-width: 100%; }
 .result-grid .result-cell { aspect-ratio: 1 / 1; }
 
 .result-cell {
