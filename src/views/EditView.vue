@@ -1443,11 +1443,11 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
           class="erase-canvas"
           :style="{ transform: imageTransform, transformOrigin: '0 0' }"
         />
-        <!-- 智能擦除：选区框（拖拽实时显示，图像像素定位） -->
+        <!-- 智能擦除：选区框（拖拽实时显示，图像像素定位；origin 0 0 与 .canvas-img 对齐） -->
         <div
           v-if="activeTool === 'watermark' && eraseMode === 'rect' && eraseRect"
           class="wm-overlay"
-          :style="{ transform: imageTransform, width: imgNatural.w + 'px', height: imgNatural.h + 'px' }"
+          :style="{ transform: imageTransform, transformOrigin: '0 0', width: imgNatural.w + 'px', height: imgNatural.h + 'px' }"
         >
           <div
             class="wm-rect"
@@ -1851,8 +1851,8 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
 /* 形状遮罩九宫格辅助线（叠加在图片上，跟随 transform） */
 .shape-grid { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 3; }
 
-/* 去水印选区框 */
-.wm-overlay { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 3; }
+/* 去水印选区框（origin 0 0 必须 CSS 固定，防止 inline style 遗漏再次错位） */
+.wm-overlay { position: absolute; top: 0; left: 0; transform-origin: 0 0; pointer-events: none; z-index: 3; }
 .wm-rect {
   position: absolute;
   border: 2px dashed var(--el-color-primary);
