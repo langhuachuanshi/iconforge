@@ -307,6 +307,8 @@ pub struct InpaintModelEntry {
     pub downloaded: bool,
     /// 已下载时的完整文件路径，未下载为 None
     pub path: Option<String>,
+    /// 是否为默认选用模型
+    pub current: bool,
 }
 
 /// 智能擦除请求（rect 为 0..1 相对坐标；mask 优先于 rect，白=擦除）
@@ -321,6 +323,9 @@ pub struct InpaintRequest {
     pub y: f64,
     pub w: f64,
     pub h: f64,
+    /// 选用模型 id（lama / migan），缺省 lama
+    #[serde(default)]
+    pub model_id: String,
 }
 
 /// 新增/更新服务商请求

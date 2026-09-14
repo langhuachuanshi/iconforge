@@ -68,6 +68,15 @@ fn with_cached_session<T>(
     f(&mut guard.as_mut().expect("cache just filled").2)
 }
 
+/// 模型 IO 约定
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Io {
+    /// float 图 [0,1] + float mask（1=擦除），输出 float 需范围自适应（LaMa）
+    Float01,
+    /// uint8 图 + uint8 mask（255=擦除），输出 uint8，预处理内置图内（MI-GAN pipeline）
+    Uint8,
+}
+
 /// 可用修复模型定义
 pub struct InpaintModel {
     pub id: &'static str,
@@ -75,15 +84,27 @@ pub struct InpaintModel {
     pub url: &'static str,
     pub filename: &'static str,
     pub size: &'static str,
+    pub io: Io,
 }
 
-pub const INPAINT_MODELS: &[InpaintModel] = &[InpaintModel {
-    id: "lama",
-    name: "LaMa 智能擦除",
-    url: "https://hf-mirror.com/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx",
-    filename: "lama_fp32.onnx",
-    size: "约 208MB",
-}];
+pub const INPAINT_MODELS: &[InpaintModel] = &[
+    InpaintModel {
+        id: "lama",
+        name: "LaMa（质量优先）",
+        url: "https://hf-mirror.com/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx",
+        filename: "lama_fp32.onnx",
+        size: "约 208MB · CPU 约 5s",
+        io: Io::Float01,
+    },
+    InpaintModel {
+        id: "migan",
+        name: "MI-GAN（速度优先）",
+        url: "https://hf-mirror.com/andraniksargsyan/migan/resolve/main/migan_pipeline_v2.onnx",
+        filename: "migan_v2.onnx",
+        size: "约 27MB · CPU 约 1.6s",
+        io: Io::Uint8,
+    },
+];
 
 pub fn get_inpaint_model(id: &str) -> &'static InpaintModel {
     INPAINT_MODELS
@@ -259,23 +280,11 @@ pub fn run_inpaint(
         image::imageops::FilterType::Nearest,
     );
 
-    // 构造张量：image [0,1] CHW；mask 0/1（1 = 待修复）
-    let mut img_data = vec![0f32; 3 * MODEL_SIZE * MODEL_SIZE];
-    let mut mask_data = vec![0f32; MODEL_SIZE * MODEL_SIZE];
-    for y in 0..MODEL_SIZE {
-        for x in 0..MODEL_SIZE {
-            let p = input_img.get_pixel(x as u32, y as u32);
-            img_data[y * MODEL_SIZE + x] = p[0] as f32 / 255.0;
-            img_data[MODEL_SIZE * MODEL_SIZE + y * MODEL_SIZE + x] = p[1] as f32 / 255.0;
-            img_data[2 * MODEL_SIZE * MODEL_SIZE + y * MODEL_SIZE + x] = p[2] as f32 / 255.0;
-            if mask_512.get_pixel(x as u32, y as u32)[0] >= 128 {
-                mask_data[y * MODEL_SIZE + x] = 1.0;
-            }
-        }
-    }
+    let m = get_inpaint_model(model_id);
 
     log::info!(
-        "[Inpaint] 选区 {}x{}，上下文裁剪 {}x{} → 模型 {}x{}",
+        "[Inpaint] 模型={} 选区 {}x{}，上下文裁剪 {}x{} → 模型 {}x{}",
+        m.id,
         x1 - x0,
         y1 - y0,
         cw,
@@ -284,20 +293,11 @@ pub fn run_inpaint(
         MODEL_SIZE
     );
 
-    let image_tensor = ort::value::Tensor::from_array((
-        vec![1i64, 3, MODEL_SIZE as i64, MODEL_SIZE as i64],
-        img_data,
-    ))
-    .map_err(|e| AppError::Image(format!("创建 image Tensor 失败: {e}")))?;
-    let mask_tensor = ort::value::Tensor::from_array((
-        vec![1i64, 1, MODEL_SIZE as i64, MODEL_SIZE as i64],
-        mask_data,
-    ))
-    .map_err(|e| AppError::Image(format!("创建 mask Tensor 失败: {e}")))?;
-
-    // 推理：会话全局缓存（208MB 模型每次重建要数秒，缓存后只有首次加载）
+    // 推理：会话全局缓存（大模型每次重建要数秒，缓存后只有首次加载）。
+    // 张量按模型 IO 约定构造：LaMa = float [0,1] + float mask(1)；MI-GAN = uint8 + uint8 mask(255)。
+    // 输出统一转成 CHW u8（LaMa float 范围自适应；MI-GAN 直接就是 u8）。
     let infer_start = std::time::Instant::now();
-    let data: Vec<f32> = with_cached_session(&model_path, |session| {
+    let data: Vec<u8> = with_cached_session(&model_path, |session| {
         let image_name = session
             .inputs()
             .iter()
@@ -317,45 +317,102 @@ pub fn run_inpaint(
                     .unwrap_or_else(|| "mask".into())
             });
 
-        let outputs = session
-            .run(ort::inputs![image_name.as_str() => image_tensor, mask_name.as_str() => mask_tensor])
-            .map_err(|e| AppError::Image(format!("智能擦除推理失败: {e}")))?;
+        // 按约定构造张量并推理（两路张量元素类型不同，无法提前统一，故分支内各自 run）
+        let outputs = match m.io {
+            Io::Float01 => {
+                let mut img_data = vec![0f32; 3 * MODEL_SIZE * MODEL_SIZE];
+                let mut mask_data = vec![0f32; MODEL_SIZE * MODEL_SIZE];
+                for y in 0..MODEL_SIZE {
+                    for x in 0..MODEL_SIZE {
+                        let p = input_img.get_pixel(x as u32, y as u32);
+                        img_data[y * MODEL_SIZE + x] = p[0] as f32 / 255.0;
+                        img_data[MODEL_SIZE * MODEL_SIZE + y * MODEL_SIZE + x] = p[1] as f32 / 255.0;
+                        img_data[2 * MODEL_SIZE * MODEL_SIZE + y * MODEL_SIZE + x] = p[2] as f32 / 255.0;
+                        if mask_512.get_pixel(x as u32, y as u32)[0] >= 128 {
+                            mask_data[y * MODEL_SIZE + x] = 1.0;
+                        }
+                    }
+                }
+                let it = ort::value::Tensor::from_array((vec![1i64, 3, MODEL_SIZE as i64, MODEL_SIZE as i64], img_data))
+                    .map_err(|e| AppError::Image(format!("创建 image Tensor 失败: {e}")))?;
+                let mt = ort::value::Tensor::from_array((vec![1i64, 1, MODEL_SIZE as i64, MODEL_SIZE as i64], mask_data))
+                    .map_err(|e| AppError::Image(format!("创建 mask Tensor 失败: {e}")))?;
+                session.run(ort::inputs![image_name.as_str() => it, mask_name.as_str() => mt])
+            }
+            Io::Uint8 => {
+                let mut img_data = vec![0u8; 3 * MODEL_SIZE * MODEL_SIZE];
+                let mut mask_data = vec![0u8; MODEL_SIZE * MODEL_SIZE];
+                for y in 0..MODEL_SIZE {
+                    for x in 0..MODEL_SIZE {
+                        let p = input_img.get_pixel(x as u32, y as u32);
+                        img_data[y * MODEL_SIZE + x] = p[0];
+                        img_data[MODEL_SIZE * MODEL_SIZE + y * MODEL_SIZE + x] = p[1];
+                        img_data[2 * MODEL_SIZE * MODEL_SIZE + y * MODEL_SIZE + x] = p[2];
+                        if mask_512.get_pixel(x as u32, y as u32)[0] >= 128 {
+                            mask_data[y * MODEL_SIZE + x] = 255;
+                        }
+                    }
+                }
+                let it = ort::value::Tensor::from_array((vec![1i64, 3, MODEL_SIZE as i64, MODEL_SIZE as i64], img_data))
+                    .map_err(|e| AppError::Image(format!("创建 image Tensor 失败: {e}")))?;
+                let mt = ort::value::Tensor::from_array((vec![1i64, 1, MODEL_SIZE as i64, MODEL_SIZE as i64], mask_data))
+                    .map_err(|e| AppError::Image(format!("创建 mask Tensor 失败: {e}")))?;
+                session.run(ort::inputs![image_name.as_str() => it, mask_name.as_str() => mt])
+            }
+        }
+        .map_err(|e| AppError::Image(format!("智能擦除推理失败: {e}")))?;
 
         let (_name, value) = outputs
             .iter()
             .next()
             .ok_or_else(|| AppError::Image("模型无输出".into()))?;
-        let (_oshape, view) = value
-            .try_extract_tensor::<f32>()
-            .map_err(|e| AppError::Image(format!("输出解析失败: {e}")))?;
-        Ok(view.to_vec())
+        match m.io {
+            Io::Uint8 => {
+                let (_oshape, view) = value
+                    .try_extract_tensor::<u8>()
+                    .map_err(|e| AppError::Image(format!("输出解析失败: {e}")))?;
+                Ok(view.to_vec())
+            }
+            Io::Float01 => {
+                let (_oshape, view) = value
+                    .try_extract_tensor::<f32>()
+                    .map_err(|e| AppError::Image(format!("输出解析失败: {e}")))?;
+                let v = view.to_vec();
+                // 输出范围自适应（该导出实际输出 0..255；兼容 0..1 与 [-1,1] 两种导出习惯）
+                let out_min = v.iter().cloned().fold(f32::INFINITY, f32::min);
+                let out_max = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                log::info!("[Inpaint] 输出范围 min={out_min} max={out_max}");
+                let to_byte = |x: f32| -> u8 {
+                    let x = if out_max > 1.5 {
+                        x.clamp(0.0, 255.0)
+                    } else if out_min < -0.05 {
+                        ((x + 1.0) / 2.0).clamp(0.0, 1.0) * 255.0
+                    } else {
+                        x.clamp(0.0, 1.0) * 255.0
+                    };
+                    x.round() as u8
+                };
+                Ok(v.iter().map(|&x| to_byte(x)).collect())
+            }
+        }
     })?;
     log::info!("[Inpaint] 推理 {}ms", infer_start.elapsed().as_millis());
-
-    // 输出范围自适应（该导出实际输出 0..255；兼容 0..1 与 [-1,1] 两种导出习惯）
-    let out_min = data.iter().cloned().fold(f32::INFINITY, f32::min);
-    let out_max = data.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    log::info!("[Inpaint] 输出范围 min={out_min} max={out_max}");
-    let to_byte = |v: f32| -> u8 {
-        let x = if out_max > 1.5 {
-            v.clamp(0.0, 255.0)
-        } else if out_min < -0.05 {
-            ((v + 1.0) / 2.0).clamp(0.0, 1.0) * 255.0
-        } else {
-            v.clamp(0.0, 1.0) * 255.0
-        };
-        x.round() as u8
-    };
 
     // 模型输出 → 512 RGBA → 缩放回上下文尺寸
     let mut out512 = image::RgbaImage::new(MODEL_SIZE as u32, MODEL_SIZE as u32);
     for y in 0..MODEL_SIZE {
         for x in 0..MODEL_SIZE {
             let idx = y * MODEL_SIZE + x;
-            let r = to_byte(data[idx]);
-            let g = to_byte(data[MODEL_SIZE * MODEL_SIZE + idx]);
-            let b = to_byte(data[2 * MODEL_SIZE * MODEL_SIZE + idx]);
-            out512.put_pixel(x as u32, y as u32, image::Rgba([r, g, b, 255]));
+            out512.put_pixel(
+                x as u32,
+                y as u32,
+                image::Rgba([
+                    data[idx],
+                    data[MODEL_SIZE * MODEL_SIZE + idx],
+                    data[2 * MODEL_SIZE * MODEL_SIZE + idx],
+                    255,
+                ]),
+            );
         }
     }
     let out_full = image::imageops::resize(
@@ -396,6 +453,18 @@ mod tests {
         let img = std::fs::read(r"C:\Users\silas\Pictures\image_498889043065379.png").unwrap();
         let out = run_inpaint(model_dir, &img, None, (0.60, 0.82, 0.40, 0.18), "lama").unwrap();
         std::fs::write(r"C:\Users\silas\AppData\Local\Temp\inpaint-out.png", &out).unwrap();
+    }
+
+    /// MI-GAN 双模型验证：与 LaMa 同输入，输出应同为有效 PNG 且遮罩区被重建
+    #[test]
+    #[ignore = "需要已下载模型与本地样图"]
+    fn inpaint_migan_sample() {
+        let model_dir = Path::new(r"C:\Users\silas\AppData\Roaming\com.iconforge.app");
+        let img = std::fs::read(r"C:\Users\silas\Pictures\image_498889043065379.png").unwrap();
+        let t0 = std::time::Instant::now();
+        let out = run_inpaint(model_dir, &img, None, (0.60, 0.82, 0.40, 0.18), "migan").unwrap();
+        eprintln!("MI-GAN 全流程: {}ms", t0.elapsed().as_millis());
+        std::fs::write(r"C:\Users\silas\AppData\Local\Temp\inpaint-migan-out.png", &out).unwrap();
     }
 
     /// 涂抹遮罩路径：黑底白块模拟笔刷遮罩；连跑两次验证会话缓存

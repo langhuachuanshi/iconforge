@@ -122,7 +122,7 @@ export function testAliyunMatting(): Promise<number> {
   return invoke('test_aliyun_matting')
 }
 
-// ---------- 去水印（LaMa 本地修复） ----------
+// ---------- 智能擦除（本地修复模型：LaMa 质量 / MI-GAN 速度） ----------
 
 export interface InpaintModelEntry {
   id: string
@@ -130,22 +130,28 @@ export interface InpaintModelEntry {
   size: string
   downloaded: boolean
   path?: string | null
+  current: boolean
 }
 
 export function listInpaintModels(): Promise<InpaintModelEntry[]> {
   return invoke('list_inpaint_models')
 }
 
-/** 导入本地 .onnx 擦除模型（镜像不可达时手动获取的文件） */
-export function importInpaintModel(path: string): Promise<void> {
-  return invoke('import_inpaint_model', { path })
+export function setInpaintModel(id: string): Promise<void> {
+  return invoke('set_inpaint_model', { id })
 }
 
-export function openInpaintLocation(): Promise<void> {
-  return invoke('open_inpaint_location')
+/** 导入本地 .onnx 擦除模型（镜像不可达时手动获取的文件） */
+export function importInpaintModel(id: string, path: string): Promise<void> {
+  return invoke('import_inpaint_model', { id, path })
+}
+
+export function openInpaintLocation(id: string): Promise<void> {
+  return invoke('open_inpaint_location', { id })
 }
 
 export async function downloadInpaintModel(
+  id: string,
   onProgress?: (pct: number) => void
 ): Promise<void> {
   const { listen } = await import('@tauri-apps/api/event')
@@ -158,7 +164,7 @@ export async function downloadInpaintModel(
   )
 
   try {
-    await invoke('download_inpaint_model', { id: 'lama' })
+    await invoke('download_inpaint_model', { id })
   } finally {
     unlisten()
   }
@@ -176,6 +182,8 @@ export async function inpaintRegion(params: {
   y: number
   w: number
   h: number
+  /** 模型 id（lama / migan），缺省走默认 */
+  modelId?: string
 }): Promise<string> {
   const result = await invoke<{ image: string }>('inpaint_region', { req: params })
   return result.image

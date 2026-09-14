@@ -236,12 +236,15 @@ pub async fn test_aliyun_matting(state: State<'_, AppState>) -> Result<u64, AppE
     Ok(start.elapsed().as_millis() as u64)
 }
 
-/// 去水印模型清单（含下载状态）
+/// 去水印模型清单（含下载状态与当前选用，读 config inpaint_model）
 #[tauri::command]
 pub fn list_inpaint_models(state: State<'_, AppState>) -> Vec<InpaintModelEntry> {
-    let dir = {
+    let (dir, current) = {
         let storage = state.storage.lock();
-        storage.base_dir().to_path_buf()
+        (
+            storage.base_dir().to_path_buf(),
+            storage.get_config("inpaint_model", "lama"),
+        )
     };
     services::inpaint::INPAINT_MODELS
         .iter()
@@ -253,14 +256,25 @@ pub fn list_inpaint_models(state: State<'_, AppState>) -> Vec<InpaintModelEntry>
                 size: m.size.into(),
                 downloaded: p.exists(),
                 path: p.exists().then(|| p.display().to_string()),
+                current: m.id == current,
             }
         })
         .collect()
 }
 
+/// 设置默认擦除模型
+#[tauri::command]
+pub fn set_inpaint_model(state: State<'_, AppState>, id: String) -> Result<(), AppError> {
+    if !services::inpaint::INPAINT_MODELS.iter().any(|m| m.id == id) {
+        return Err(AppError::NotFound(format!("擦除模型 {id} 不存在")));
+    }
+    let mut storage = state.storage.lock();
+    storage.set_config("inpaint_model", &id)
+}
+
 /// 导入本地擦除模型文件（.onnx，复制进应用模型目录；用于镜像不可达时手动获取）
 #[tauri::command]
-pub fn import_inpaint_model(state: State<'_, AppState>, path: String) -> Result<(), AppError> {
+pub fn import_inpaint_model(state: State<'_, AppState>, id: String, path: String) -> Result<(), AppError> {
     let src = std::path::PathBuf::from(&path);
     if !src.is_file() {
         return Err(AppError::NotFound(format!("文件不存在: {path}")));
@@ -272,24 +286,26 @@ pub fn import_inpaint_model(state: State<'_, AppState>, path: String) -> Result<
     if !is_onnx {
         return Err(AppError::ProviderError("请选择 .onnx 模型文件".into()));
     }
+    let m = services::inpaint::get_inpaint_model(&id);
     let dir = {
         let storage = state.storage.lock();
         storage.base_dir().to_path_buf()
     };
     std::fs::create_dir_all(dir.join("models"))?;
-    let dst = services::inpaint::model_path(&dir, "lama_fp32.onnx");
+    let dst = services::inpaint::model_path(&dir, m.filename);
     std::fs::copy(&src, &dst)?;
     Ok(())
 }
 
 /// 在资源管理器中打开擦除模型所在位置
 #[tauri::command]
-pub fn open_inpaint_location(state: State<'_, AppState>) -> Result<(), AppError> {
+pub fn open_inpaint_location(state: State<'_, AppState>, id: String) -> Result<(), AppError> {
+    let m = services::inpaint::get_inpaint_model(&id);
     let dir = {
         let storage = state.storage.lock();
         storage.base_dir().to_path_buf()
     };
-    let p = services::inpaint::model_path(&dir, "lama_fp32.onnx");
+    let p = services::inpaint::model_path(&dir, m.filename);
     if !p.exists() {
         return Err(AppError::NotFound("擦除模型未下载".into()));
     }
@@ -349,12 +365,13 @@ pub async fn inpaint_region(
     };
 
     let result = tokio::task::spawn_blocking(move || {
+        let model = if req.model_id.is_empty() { "lama".to_string() } else { req.model_id };
         services::inpaint::run_inpaint(
             &dir,
             &bytes,
             mask_bytes.as_deref(),
             (req.x, req.y, req.w, req.h),
-            "lama",
+            &model,
         )
     })
     .await

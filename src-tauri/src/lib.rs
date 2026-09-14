@@ -67,6 +67,7 @@ pub fn run() {
             commands::generate::test_provider,
             commands::edit::test_aliyun_matting,
             commands::edit::list_inpaint_models,
+            commands::edit::set_inpaint_model,
             commands::edit::download_inpaint_model,
             commands::edit::delete_inpaint_model,
             commands::edit::import_inpaint_model,

@@ -14,6 +14,7 @@ import {
   downloadBgModel,
   listBgModels,
   listInpaintModels,
+  setInpaintModel,
   downloadInpaintModel,
   inpaintRegion,
   getConfig,
@@ -41,10 +42,11 @@ const currentBgModelId = ref('')
 
 const downloadedBgModels = computed(() => bgModels.value.filter(m => m.downloaded))
 
-// ── 智能擦除（LaMa 本地修复）──
+// ── 智能擦除（本地修复模型：LaMa 质量 / MI-GAN 速度）──
 const inpaintModels = ref<InpaintModelEntry[]>([])
 const inpaintDownloading = ref(false)
 const inpaintPct = ref(0)
+const inpaintDownloadingId = ref('')
 // 擦除方式：涂抹（笔刷遮罩）/ 选区（画布拖框）
 const eraseMode = ref<'brush' | 'rect'>('brush')
 const eraseBrushSize = ref(48) // 笔刷直径（图像像素）
@@ -1229,27 +1231,43 @@ function eraseMouseUp() {
   eraseDragStart = null
 }
 
-async function handleDownloadInpaintModel() {
-  inpaintDownloading.value = true; inpaintPct.value = 0
+async function handleDownloadInpaintModel(id: string) {
+  if (inpaintDownloading.value) return
+  inpaintDownloading.value = true; inpaintDownloadingId.value = id; inpaintPct.value = 0
   try {
-    await downloadInpaintModel(pct => { inpaintPct.value = Math.round(pct) })
+    await downloadInpaintModel(id, pct => { inpaintPct.value = Math.round(pct) })
     await loadInpaintModels()
     ElMessage.success('下载完成')
   } catch (e: any) { ElMessage.error(`下载失败：${e?.message || e}`) }
-  finally { inpaintDownloading.value = false }
+  finally { inpaintDownloading.value = false; inpaintDownloadingId.value = '' }
+}
+
+// 切换默认擦除模型（需已下载）
+async function onInpaintModelChange(id: string) {
+  try {
+    await setInpaintModel(id)
+    await loadInpaintModels()
+  } catch (e: any) {
+    ElMessage.error(`切换失败：${e?.message || e}`)
+    await loadInpaintModels()
+  }
 }
 
 async function handleInpaint() {
   if (!image.value) return
-  const model = inpaintModels.value.find(x => x.downloaded)
+  // 默认模型优先；未下载则用任一已下载模型；全都没有则引导下载默认模型
+  let model = inpaintModels.value.find(x => x.current && x.downloaded)
+    || inpaintModels.value.find(x => x.downloaded)
   if (!model) {
+    const def = inpaintModels.value.find(x => x.current) || inpaintModels.value[0]
     try {
-      await ElMessageBox.confirm('擦除模型未下载（约 208MB，仅首次），是否下载？', '下载模型', {
+      await ElMessageBox.confirm(`擦除模型「${def?.name}」未下载（${def?.size}，仅首次），是否下载？`, '下载模型', {
         confirmButtonText: '下载', cancelButtonText: '取消', type: 'info'
       })
     } catch { return }
-    await handleDownloadInpaintModel()
-    if (!inpaintModels.value.some(x => x.downloaded)) return
+    await handleDownloadInpaintModel(def.id)
+    model = inpaintModels.value.find(x => x.downloaded)
+    if (!model) return
   }
   // 涂抹：导出遮罩并自检覆盖率；选区：取拖出的框
   let mask: string | undefined
@@ -1280,6 +1298,7 @@ async function handleInpaint() {
     syncImage(await inpaintRegion({
       image: image.value, mask,
       x: rect.x / nw, y: rect.y / nh, w: rect.w / nw, h: rect.h / nh,
+      modelId: model.id,
     }))
     clearErase() // 应用后清掉笔迹/选框，避免残留误导
     ElMessage.success('擦除完成')
@@ -1622,33 +1641,38 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
           <div class="bg-model-picker">
             <span class="tool-desc">擦除模型</span>
             <el-select
-              :model-value="(inpaintModels.find(m => m.downloaded) || inpaintModels[0])?.id"
+              :model-value="(inpaintModels.find(m => m.current && m.downloaded) || inpaintModels.find(m => m.downloaded))?.id"
               size="small"
               style="width:100%; margin-top:4px"
-              disabled
+              :disabled="inpaintModels.filter(m => m.downloaded).length < 2"
+              @change="onInpaintModelChange"
             >
               <el-option
-                v-for="m in inpaintModels"
+                v-for="m in inpaintModels.filter(x => x.downloaded)"
                 :key="m.id"
                 :value="m.id"
-                :label="m.downloaded ? `${m.name}（已下载）` : `${m.name}（未下载 · ${m.size}）`"
+                :label="m.name"
               />
             </el-select>
           </div>
-          <el-button
-            v-if="!inpaintModels.some(m => m.downloaded)"
-            :disabled="inpaintDownloading"
-            @click="handleDownloadInpaintModel"
-            style="width:100%; margin-top:8px"
-          >
-            {{ inpaintDownloading ? `下载中 ${inpaintPct}%` : '下载擦除模型' }}
-          </el-button>
+          <template v-for="m in inpaintModels.filter(x => !x.downloaded)" :key="m.id">
+            <el-button
+              size="small"
+              style="width:100%; margin-top:8px"
+              :loading="inpaintDownloadingId === m.id"
+              :disabled="inpaintDownloading"
+              @click="handleDownloadInpaintModel(m.id)"
+            >
+              下载{{ m.name }}（{{ m.size }}）
+            </el-button>
+          </template>
           <el-progress
             v-if="inpaintDownloading"
             :percentage="inpaintPct"
             :stroke-width="6"
             style="margin-top:8px"
           />
+          <p class="tool-desc" style="margin-top:4px">模型管理在 设置 → 智能擦除</p>
 
           <el-divider />
           <el-radio-group v-model="eraseMode" size="small" style="width:100%">
