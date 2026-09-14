@@ -14,6 +14,11 @@ import {
   downloadBgModel,
   deleteBgModel,
   openModelLocation,
+  listInpaintModels,
+  downloadInpaintModel,
+  deleteInpaintModel,
+  importInpaintModel,
+  openInpaintLocation,
   getConfig,
   setConfig,
   testProvider,
@@ -21,6 +26,7 @@ import {
   type ProviderEntry,
   type ProviderUpsertRequest,
   type BgModelEntry,
+  type InpaintModelEntry,
 } from '../api/client'
 
 const providers = ref<ProviderEntry[]>([])
@@ -289,6 +295,76 @@ async function loadBgSettings() {
     aliyunSk.value = cfg.aliyun_sk ?? ''
     aliyunModel.value = cfg.cloud_model === 'commodity' ? 'commodity' : 'common'
   } catch { /* 静默 */ }
+  await loadInpaintSetting()
+}
+
+// ── 智能擦除模型 ──
+const inpaintModel = ref<InpaintModelEntry | null>(null)
+const inpaintDownloading = ref(false)
+const inpaintPct = ref(0)
+
+async function loadInpaintSetting() {
+  try {
+    const list = await listInpaintModels()
+    inpaintModel.value = list[0] ?? null
+  } catch { /* 静默 */ }
+}
+
+async function handleDownloadInpaint() {
+  if (inpaintDownloading.value) return
+  inpaintDownloading.value = true
+  inpaintPct.value = 0
+  try {
+    await downloadInpaintModel((pct: number) => { inpaintPct.value = Math.round(pct) })
+    await loadInpaintSetting()
+    ElMessage.success('擦除模型下载完成')
+  } catch (e: any) {
+    ElMessage.error({ message: '下载失败：' + (e?.message || e) + '（可改用「导入本地模型」）', duration: 8000, showClose: true })
+  } finally {
+    inpaintDownloading.value = false
+  }
+}
+
+/** 导入本地 .onnx：镜像不可达时，从其他途径下载后手动导入 */
+async function handleImportInpaint() {
+  const { open } = await import('@tauri-apps/plugin-dialog')
+  const picked = await open({
+    title: '选择擦除模型文件（.onnx）',
+    filters: [{ name: 'ONNX 模型', extensions: ['onnx'] }],
+  })
+  const path = Array.isArray(picked) ? picked[0] : picked
+  if (!path) return
+  try {
+    await importInpaintModel(path)
+    await loadInpaintSetting()
+    ElMessage.success('导入成功')
+  } catch (e: any) {
+    ElMessage.error('导入失败：' + (e?.message || e))
+  }
+}
+
+async function handleDeleteInpaint() {
+  if (!inpaintModel.value?.downloaded) return
+  try {
+    await ElMessageBox.confirm('删除擦除模型（约 208MB，可随时重新下载/导入）？', '删除模型', {
+      confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning'
+    })
+  } catch { return }
+  try {
+    await deleteInpaintModel(inpaintModel.value.id)
+    await loadInpaintSetting()
+    ElMessage.success('已删除')
+  } catch (e: any) {
+    ElMessage.error('删除失败：' + (e?.message || e))
+  }
+}
+
+async function handleOpenInpaintLocation() {
+  try {
+    await openInpaintLocation()
+  } catch (e: any) {
+    ElMessage.error('打开失败：' + (e?.message || e))
+  }
 }
 
 async function saveAliyunKeys() {
@@ -504,6 +580,36 @@ async function openLocation(id: string) {
               <template v-else>
                 <el-button text size="small" @click="openLocation(m.id)" title="打开文件位置">位置</el-button>
                 <el-button text size="small" type="danger" @click="deleteModel(m.id)">删除</el-button>
+              </template>
+            </div>
+          </div>
+        </div>
+
+        <el-divider />
+
+        <h3 class="section-title">智能擦除模型</h3>
+        <div class="provider-list">
+          <div v-if="inpaintModel" class="svc-card provider-row bg-model-card">
+            <div class="row-main">
+              <div class="row-top">
+                <span class="row-name">{{ inpaintModel.name }}</span>
+                <el-tag v-if="inpaintModel.downloaded" type="success" size="small">已下载</el-tag>
+                <el-tag v-else type="warning" size="small" effect="plain">未下载</el-tag>
+              </div>
+              <div class="row-meta">
+                <span class="row-model">编辑器「智能擦除」· 大小：{{ inpaintModel.size }}</span>
+              </div>
+              <el-progress v-if="inpaintDownloading" :percentage="inpaintPct" :stroke-width="6" style="margin-top: 6px" />
+            </div>
+            <div class="row-actions">
+              <template v-if="!inpaintModel.downloaded">
+                <el-button text size="small" type="primary" :loading="inpaintDownloading" @click="handleDownloadInpaint">下载</el-button>
+                <el-button text size="small" @click="handleImportInpaint" title="从本地 .onnx 文件导入">导入</el-button>
+              </template>
+              <template v-else>
+                <el-button text size="small" @click="handleImportInpaint" title="重新导入/替换">导入</el-button>
+                <el-button text size="small" @click="handleOpenInpaintLocation" title="打开文件位置">位置</el-button>
+                <el-button text size="small" type="danger" @click="handleDeleteInpaint">删除</el-button>
               </template>
             </div>
           </div>

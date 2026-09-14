@@ -305,6 +305,8 @@ pub struct InpaintModelEntry {
     pub name: String,
     pub size: String,
     pub downloaded: bool,
+    /// 已下载时的完整文件路径，未下载为 None
+    pub path: Option<String>,
 }
 
 /// 智能擦除请求（rect 为 0..1 相对坐标；mask 优先于 rect，白=擦除）

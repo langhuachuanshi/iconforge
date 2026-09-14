@@ -6,14 +6,57 @@
 //! 尺寸要求：H/W 为 8 的倍数（不足则边缘复制填充，推理后裁回）
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
+use parking_lot::Mutex;
 use reqwest::Client;
 use tauri::Emitter;
 use tokio::io::AsyncWriteExt;
 
 use crate::error::AppError;
 use crate::models::BgDownloadProgress;
+
+/// 推理会话缓存：模型路径 + 文件元数据（换/重导模型后自动失效）。
+/// 208MB 模型每次重建要几秒，缓存后只有首次擦除付这个成本。
+static SESSION_CACHE: OnceLock<Mutex<Option<(PathBuf, u64, ort::session::Session)>>> =
+    OnceLock::new();
+
+/** 取缓存的推理会话；未缓存/已失效则从磁盘加载。返回前保持锁，调用期间独占。 */
+fn with_cached_session<T>(
+    model_path: &Path,
+    f: impl FnOnce(&mut ort::session::Session) -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    use ort::session::Session;
+
+    let stamp = std::fs::metadata(model_path)
+        .map(|m| {
+            m.len().wrapping_mul(31)
+                ^ m.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0)
+        })
+        .unwrap_or(0);
+
+    let cache = SESSION_CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cache.lock();
+    let stale = match guard.as_ref() {
+        Some((p, s, _)) => p != model_path || *s != stamp,
+        None => true,
+    };
+    if stale {
+        let start = std::time::Instant::now();
+        let sess = Session::builder()
+            .map_err(|e| AppError::Image(format!("创建 Session 失败: {e}")))?
+            .commit_from_file(model_path)
+            .map_err(|e| AppError::Image(format!("加载模型失败: {e}")))?;
+        log::info!("[Inpaint] 模型加载 {}ms", start.elapsed().as_millis());
+        *guard = Some((model_path.to_path_buf(), stamp, sess));
+    }
+    f(&mut guard.as_mut().expect("cache just filled").2)
+}
 
 /// 可用修复模型定义
 pub struct InpaintModel {
@@ -221,13 +264,6 @@ pub fn run_inpaint(
         }
     }
 
-    // 推理（CPU 会话，与抠图同模式）
-    use ort::session::Session;
-    let mut session = Session::builder()
-        .map_err(|e| AppError::Image(format!("创建 Session 失败: {e}")))?
-        .commit_from_file(&model_path)
-        .map_err(|e| AppError::Image(format!("加载模型失败: {e}")))?;
-
     log::info!(
         "[Inpaint] 选区 {}x{}，上下文裁剪 {}x{} → 模型 {}x{}",
         x1 - x0,
@@ -249,36 +285,42 @@ pub fn run_inpaint(
     ))
     .map_err(|e| AppError::Image(format!("创建 mask Tensor 失败: {e}")))?;
 
-    let image_name = session
-        .inputs()
-        .iter()
-        .find(|i| i.name() == "image")
-        .map(|i| i.name().to_string())
-        .unwrap_or_else(|| session.inputs()[0].name().to_string());
-    let mask_name = session
-        .inputs()
-        .iter()
-        .find(|i| i.name() == "mask")
-        .map(|i| i.name().to_string())
-        .unwrap_or_else(|| {
-            session
-                .inputs()
-                .get(1)
-                .map(|i| i.name().to_string())
-                .unwrap_or_else(|| "mask".into())
-        });
+    // 推理：会话全局缓存（208MB 模型每次重建要数秒，缓存后只有首次加载）
+    let infer_start = std::time::Instant::now();
+    let data: Vec<f32> = with_cached_session(&model_path, |session| {
+        let image_name = session
+            .inputs()
+            .iter()
+            .find(|i| i.name() == "image")
+            .map(|i| i.name().to_string())
+            .unwrap_or_else(|| session.inputs()[0].name().to_string());
+        let mask_name = session
+            .inputs()
+            .iter()
+            .find(|i| i.name() == "mask")
+            .map(|i| i.name().to_string())
+            .unwrap_or_else(|| {
+                session
+                    .inputs()
+                    .get(1)
+                    .map(|i| i.name().to_string())
+                    .unwrap_or_else(|| "mask".into())
+            });
 
-    let outputs = session
-        .run(ort::inputs![image_name.as_str() => image_tensor, mask_name.as_str() => mask_tensor])
-        .map_err(|e| AppError::Image(format!("智能擦除推理失败: {e}")))?;
+        let outputs = session
+            .run(ort::inputs![image_name.as_str() => image_tensor, mask_name.as_str() => mask_tensor])
+            .map_err(|e| AppError::Image(format!("智能擦除推理失败: {e}")))?;
 
-    let (_name, value) = outputs
-        .iter()
-        .next()
-        .ok_or_else(|| AppError::Image("模型无输出".into()))?;
-    let (_oshape, data) = value
-        .try_extract_tensor::<f32>()
-        .map_err(|e| AppError::Image(format!("输出解析失败: {e}")))?;
+        let (_name, value) = outputs
+            .iter()
+            .next()
+            .ok_or_else(|| AppError::Image("模型无输出".into()))?;
+        let (_oshape, view) = value
+            .try_extract_tensor::<f32>()
+            .map_err(|e| AppError::Image(format!("输出解析失败: {e}")))?;
+        Ok(view.to_vec())
+    })?;
+    log::info!("[Inpaint] 推理 {}ms", infer_start.elapsed().as_millis());
 
     // 输出范围自适应（该导出实际输出 0..255；兼容 0..1 与 [-1,1] 两种导出习惯）
     let out_min = data.iter().cloned().fold(f32::INFINITY, f32::min);
@@ -346,7 +388,7 @@ mod tests {
         std::fs::write(r"C:\Users\silas\AppData\Local\Temp\inpaint-out.png", &out).unwrap();
     }
 
-    /// 涂抹遮罩路径：黑底白块模拟笔刷遮罩
+    /// 涂抹遮罩路径：黑底白块模拟笔刷遮罩；连跑两次验证会话缓存
     #[test]
     #[ignore = "需要已下载模型与本地样图"]
     fn inpaint_mask_sample() {
@@ -362,7 +404,12 @@ mod tests {
         image::DynamicImage::ImageLuma8(m)
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
+        let t0 = std::time::Instant::now();
         let out = run_inpaint(model_dir, &img, Some(&png), (0.0, 0.0, 0.0, 0.0), "lama").unwrap();
         std::fs::write(r"C:\Users\silas\AppData\Local\Temp\inpaint-mask-out.png", &out).unwrap();
+        eprintln!("第一次（含模型加载）: {}ms", t0.elapsed().as_millis());
+        let t1 = std::time::Instant::now();
+        let _ = run_inpaint(model_dir, &img, Some(&png), (0.0, 0.0, 0.0, 0.0), "lama").unwrap();
+        eprintln!("第二次（会话缓存）: {}ms", t1.elapsed().as_millis());
     }
 }

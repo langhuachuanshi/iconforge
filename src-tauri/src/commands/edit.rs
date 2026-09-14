@@ -245,13 +245,67 @@ pub fn list_inpaint_models(state: State<'_, AppState>) -> Vec<InpaintModelEntry>
     };
     services::inpaint::INPAINT_MODELS
         .iter()
-        .map(|m| InpaintModelEntry {
-            id: m.id.into(),
-            name: m.name.into(),
-            size: m.size.into(),
-            downloaded: services::inpaint::is_downloaded(&dir, m.id),
+        .map(|m| {
+            let p = services::inpaint::model_path(&dir, m.filename);
+            InpaintModelEntry {
+                id: m.id.into(),
+                name: m.name.into(),
+                size: m.size.into(),
+                downloaded: p.exists(),
+                path: p.exists().then(|| p.display().to_string()),
+            }
         })
         .collect()
+}
+
+/// 导入本地擦除模型文件（.onnx，复制进应用模型目录；用于镜像不可达时手动获取）
+#[tauri::command]
+pub fn import_inpaint_model(state: State<'_, AppState>, path: String) -> Result<(), AppError> {
+    let src = std::path::PathBuf::from(&path);
+    if !src.is_file() {
+        return Err(AppError::NotFound(format!("文件不存在: {path}")));
+    }
+    let is_onnx = src
+        .extension()
+        .map(|e| e.eq_ignore_ascii_case("onnx"))
+        .unwrap_or(false);
+    if !is_onnx {
+        return Err(AppError::ProviderError("请选择 .onnx 模型文件".into()));
+    }
+    let dir = {
+        let storage = state.storage.lock();
+        storage.base_dir().to_path_buf()
+    };
+    std::fs::create_dir_all(dir.join("models"))?;
+    let dst = services::inpaint::model_path(&dir, "lama_fp32.onnx");
+    std::fs::copy(&src, &dst)?;
+    Ok(())
+}
+
+/// 在资源管理器中打开擦除模型所在位置
+#[tauri::command]
+pub fn open_inpaint_location(state: State<'_, AppState>) -> Result<(), AppError> {
+    let dir = {
+        let storage = state.storage.lock();
+        storage.base_dir().to_path_buf()
+    };
+    let p = services::inpaint::model_path(&dir, "lama_fp32.onnx");
+    if !p.exists() {
+        return Err(AppError::NotFound("擦除模型未下载".into()));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", p.display()))
+            .spawn()?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::process::Command::new("open")
+            .arg(p.parent().unwrap_or(&p))
+            .spawn()?;
+    }
+    Ok(())
 }
 
 /// 下载去水印模型（含进度事件）

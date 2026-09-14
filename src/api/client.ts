@@ -129,10 +129,20 @@ export interface InpaintModelEntry {
   name: string
   size: string
   downloaded: boolean
+  path?: string | null
 }
 
 export function listInpaintModels(): Promise<InpaintModelEntry[]> {
   return invoke('list_inpaint_models')
+}
+
+/** 导入本地 .onnx 擦除模型（镜像不可达时手动获取的文件） */
+export function importInpaintModel(path: string): Promise<void> {
+  return invoke('import_inpaint_model', { path })
+}
+
+export function openInpaintLocation(): Promise<void> {
+  return invoke('open_inpaint_location')
 }
 
 export async function downloadInpaintModel(

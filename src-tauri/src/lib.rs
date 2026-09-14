@@ -69,6 +69,8 @@ pub fn run() {
             commands::edit::list_inpaint_models,
             commands::edit::download_inpaint_model,
             commands::edit::delete_inpaint_model,
+            commands::edit::import_inpaint_model,
+            commands::edit::open_inpaint_location,
             commands::edit::inpaint_region,
             commands::config::get_config,
             commands::config::set_config,

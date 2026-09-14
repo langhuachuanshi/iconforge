@@ -36,6 +36,7 @@ ico = "0.5"
 thiserror = "2"
 async-trait = "0.1"
 parking_lot = "0.12"
+# 注：试过 directml GPU EP——LaMa 的 Fourier MatMul 节点与 DML 不兼容（80070057），只能 CPU
 ort = { version = "2.0.0-rc.12", features = ["download-binaries"] }
 futures-util = "0.3"
 pelite = "0.10"
