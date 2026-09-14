@@ -100,7 +100,7 @@ pub async fn generate_icon(
 
     // 3. 调用 OpenAI 兼容 API
     log::info!("[生成] 服务商={} endpoint={} model={} size={}", config.name, config.endpoint, config.model, req.size);
-    log::info!("[生成] prompt={}", prompt.chars().take(200).collect::<String>());
+    log::info!("[生成] prompt={} 字符，全文：{}", prompt.chars().count(), prompt);
     let result = OpenAiProvider::generate(
         &config,
         &prompt,
