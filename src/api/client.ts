@@ -160,6 +160,8 @@ export function deleteInpaintModel(id: string): Promise<void> {
 
 export async function inpaintRegion(params: {
   image: string
+  /** 涂抹遮罩（base64 PNG，与原图同尺寸，白=擦除）；优先于 rect */
+  mask?: string
   x: number
   y: number
   w: number

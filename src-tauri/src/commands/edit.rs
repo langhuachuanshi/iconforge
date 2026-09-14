@@ -278,20 +278,30 @@ pub fn delete_inpaint_model(state: State<'_, AppState>, id: String) -> Result<()
     services::inpaint::delete_model(&dir, &id)
 }
 
-/// 区域修复（去水印）：rect 为 0..1 相对坐标，选区外保留原像素
+/// 智能擦除（LaMa 本地修复）：mask（白=擦除）优先于 rect 选区，遮罩外保留原像素
 #[tauri::command]
 pub async fn inpaint_region(
     state: State<'_, AppState>,
     req: InpaintRequest,
 ) -> Result<ImageResponse, AppError> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(&req.image)?;
+    let mask_bytes = match req.mask.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(m) => Some(base64::engine::general_purpose::STANDARD.decode(m)?),
+        None => None,
+    };
     let dir = {
         let storage = state.storage.lock();
         storage.base_dir().to_path_buf()
     };
 
     let result = tokio::task::spawn_blocking(move || {
-        services::inpaint::run_inpaint(&dir, &bytes, (req.x, req.y, req.w, req.h), "lama")
+        services::inpaint::run_inpaint(
+            &dir,
+            &bytes,
+            mask_bytes.as_deref(),
+            (req.x, req.y, req.w, req.h),
+            "lama",
+        )
     })
     .await
     .map_err(|e| AppError::Image(e.to_string()))??;

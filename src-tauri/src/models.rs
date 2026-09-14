@@ -307,12 +307,14 @@ pub struct InpaintModelEntry {
     pub downloaded: bool,
 }
 
-/// 去水印请求（rect 为 0..1 相对坐标）
+/// 智能擦除请求（rect 为 0..1 相对坐标；mask 优先于 rect，白=擦除）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InpaintRequest {
     /// base64 编码的 PNG
     pub image: String,
+    /// 涂抹遮罩（base64 PNG，与原图同尺寸，白色 = 待擦除像素）
+    pub mask: Option<String>,
     pub x: f64,
     pub y: f64,
     pub w: f64,

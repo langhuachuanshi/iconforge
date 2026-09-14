@@ -26,7 +26,7 @@ pub struct InpaintModel {
 
 pub const INPAINT_MODELS: &[InpaintModel] = &[InpaintModel {
     id: "lama",
-    name: "LaMa 修复",
+    name: "LaMa 智能擦除",
     url: "https://hf-mirror.com/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx",
     filename: "lama_fp32.onnx",
     size: "约 208MB",
@@ -110,19 +110,20 @@ pub async fn download_model(
     Ok(())
 }
 
-/// 区域修复：PNG 图片字节 + 相对坐标矩形（0..1）→ 修复后 PNG 字节。
-/// 只替换矩形内像素，矩形外保持原图。
+/// 智能擦除：PNG 图片字节 + 遮罩（白=擦除；未提供时用 rect 生成）→ 修复后 PNG 字节。
+/// 只替换遮罩内像素，其余保持原图。
 pub fn run_inpaint(
     model_dir: &Path,
     image_bytes: &[u8],
+    mask_bytes: Option<&[u8]>,
     rect: (f64, f64, f64, f64),
     model_id: &str,
 ) -> Result<Vec<u8>, AppError> {
-    use image::RgbaImage;
+    const MODEL_SIZE: usize = 512;
 
     let model_path = model_path(model_dir, get_inpaint_model(model_id).filename);
     if !model_path.exists() {
-        return Err(AppError::Image("修复模型未下载".into()));
+        return Err(AppError::Image("擦除模型未下载".into()));
     }
 
     let img = image::load_from_memory(image_bytes)
@@ -131,20 +132,55 @@ pub fn run_inpaint(
     let (w, h) = img.dimensions();
     let (w, h) = (w as usize, h as usize);
 
-    // 相对坐标 → 像素矩形（clamp 到图内）
-    let (rx, ry, rw, rh) = rect;
-    let x0 = ((rx.clamp(0.0, 1.0)) * w as f64).round() as usize;
-    let y0 = ((ry.clamp(0.0, 1.0)) * h as f64).round() as usize;
-    let x1 = (((rx + rw).clamp(0.0, 1.0)) * w as f64).round() as usize;
-    let y1 = (((ry + rh).clamp(0.0, 1.0)) * h as f64).round() as usize;
-    let (x0, y0) = (x0.min(w), y0.min(h));
-    let (x1, y1) = (x1.max(x0).min(w), y1.max(y0).min(h));
-    if x1 == x0 || y1 == y0 {
-        return Err(AppError::Image("修复区域为空".into()));
+    // 遮罩图（白=擦除）：优先涂抹遮罩，否则由矩形生成
+    let mask_img: image::GrayImage = if let Some(mb) = mask_bytes {
+        let m = image::load_from_memory(mb)
+            .map_err(|e| AppError::Image(format!("解码遮罩失败: {e}")))?
+            .to_luma8();
+        if m.dimensions() != (w as u32, h as u32) {
+            image::imageops::resize(
+                &m,
+                w as u32,
+                h as u32,
+                image::imageops::FilterType::Nearest,
+            )
+        } else {
+            m
+        }
+    } else {
+        let (rx, ry, rw, rh) = rect;
+        let x = (rx.clamp(0.0, 1.0) * w as f64).round() as u32;
+        let y = (ry.clamp(0.0, 1.0) * h as f64).round() as u32;
+        let rw2 = (rw.clamp(0.0, 1.0) * w as f64).round() as u32;
+        let rh2 = (rh.clamp(0.0, 1.0) * h as f64).round() as u32;
+        let mut m = image::GrayImage::new(w as u32, h as u32);
+        for yy in y..(y + rh2).min(h as u32) {
+            for xx in x..(x + rw2).min(w as u32) {
+                m.put_pixel(xx, yy, image::Luma([255u8]));
+            }
+        }
+        m
+    };
+
+    // 擦除像素的包围盒
+    let mut x0 = w;
+    let mut y0 = h;
+    let mut x1 = 0usize;
+    let mut y1 = 0usize;
+    for (x, y, p) in mask_img.enumerate_pixels() {
+        if p[0] >= 128 {
+            let (px, py) = (x as usize, y as usize);
+            x0 = x0.min(px);
+            y0 = y0.min(py);
+            x1 = x1.max(px + 1);
+            y1 = y1.max(py + 1);
+        }
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return Err(AppError::Image("擦除区域为空，请先涂抹或框选".into()));
     }
 
     // 选区外加 25% 上下文（帮助 LaMa 理解周边内容），裁剪后缩放到模型固定的 512×512
-    const MODEL_SIZE: usize = 512;
     let ctx = ((x1 - x0).max(y1 - y0)) / 4;
     let ctx = ctx.max(16);
     let ex0 = x0.saturating_sub(ctx);
@@ -160,14 +196,15 @@ pub fn run_inpaint(
         MODEL_SIZE as u32,
         image::imageops::FilterType::CatmullRom,
     );
-
-    // 内层（待修复）矩形映射到 512 坐标
-    let map_x = |v: usize| ((v - ex0) as f64 / cw as f64 * MODEL_SIZE as f64).round() as usize;
-    let map_y = |v: usize| ((v - ey0) as f64 / ch as f64 * MODEL_SIZE as f64).round() as usize;
-    let mx0 = map_x(x0).min(MODEL_SIZE);
-    let my0 = map_y(y0).min(MODEL_SIZE);
-    let mx1 = map_x(x1).max(mx0 + 1).min(MODEL_SIZE);
-    let my1 = map_y(y1).max(my0 + 1).min(MODEL_SIZE);
+    // 遮罩同步裁剪缩放（最近邻保持二值）
+    let crop_mask = image::imageops::crop_imm(&mask_img, ex0 as u32, ey0 as u32, cw as u32, ch as u32)
+        .to_image();
+    let mask_512 = image::imageops::resize(
+        &crop_mask,
+        MODEL_SIZE as u32,
+        MODEL_SIZE as u32,
+        image::imageops::FilterType::Nearest,
+    );
 
     // 构造张量：image [0,1] CHW；mask 0/1（1 = 待修复）
     let mut img_data = vec![0f32; 3 * MODEL_SIZE * MODEL_SIZE];
@@ -178,7 +215,7 @@ pub fn run_inpaint(
             img_data[y * MODEL_SIZE + x] = p[0] as f32 / 255.0;
             img_data[MODEL_SIZE * MODEL_SIZE + y * MODEL_SIZE + x] = p[1] as f32 / 255.0;
             img_data[2 * MODEL_SIZE * MODEL_SIZE + y * MODEL_SIZE + x] = p[2] as f32 / 255.0;
-            if x >= mx0 && x < mx1 && y >= my0 && y < my1 {
+            if mask_512.get_pixel(x as u32, y as u32)[0] >= 128 {
                 mask_data[y * MODEL_SIZE + x] = 1.0;
             }
         }
@@ -233,7 +270,7 @@ pub fn run_inpaint(
 
     let outputs = session
         .run(ort::inputs![image_name.as_str() => image_tensor, mask_name.as_str() => mask_tensor])
-        .map_err(|e| AppError::Image(format!("修复推理失败: {e}")))?;
+        .map_err(|e| AppError::Image(format!("智能擦除推理失败: {e}")))?;
 
     let (_name, value) = outputs
         .iter()
@@ -276,10 +313,13 @@ pub fn run_inpaint(
         image::imageops::FilterType::CatmullRom,
     );
 
-    // 写回：仅内层选区像素取模型输出，选区外保留原图
+    // 写回：仅遮罩内像素取模型输出，遮罩外保留原图
     let mut out = img;
     for y in y0..y1 {
         for x in x0..x1 {
+            if mask_img.get_pixel(x as u32, y as u32)[0] < 128 {
+                continue;
+            }
             let p = out_full.get_pixel((x - ex0) as u32, (y - ey0) as u32);
             out.put_pixel(x as u32, y as u32, image::Rgba([p[0], p[1], p[2], 255]));
         }
@@ -302,7 +342,27 @@ mod tests {
     fn inpaint_watermark_sample() {
         let model_dir = Path::new(r"C:\Users\silas\AppData\Roaming\com.iconforge.app");
         let img = std::fs::read(r"C:\Users\silas\Pictures\image_498889043065379.png").unwrap();
-        let out = run_inpaint(model_dir, &img, (0.60, 0.82, 0.40, 0.18), "lama").unwrap();
+        let out = run_inpaint(model_dir, &img, None, (0.60, 0.82, 0.40, 0.18), "lama").unwrap();
         std::fs::write(r"C:\Users\silas\AppData\Local\Temp\inpaint-out.png", &out).unwrap();
+    }
+
+    /// 涂抹遮罩路径：黑底白块模拟笔刷遮罩
+    #[test]
+    #[ignore = "需要已下载模型与本地样图"]
+    fn inpaint_mask_sample() {
+        let model_dir = Path::new(r"C:\Users\silas\AppData\Roaming\com.iconforge.app");
+        let img = std::fs::read(r"C:\Users\silas\Pictures\image_498889043065379.png").unwrap();
+        let mut m = image::GrayImage::new(1024, 1024);
+        for yy in 880..1000 {
+            for xx in 640..980 {
+                m.put_pixel(xx, yy, image::Luma([255u8]));
+            }
+        }
+        let mut png = Vec::new();
+        image::DynamicImage::ImageLuma8(m)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let out = run_inpaint(model_dir, &img, Some(&png), (0.0, 0.0, 0.0, 0.0), "lama").unwrap();
+        std::fs::write(r"C:\Users\silas\AppData\Local\Temp\inpaint-mask-out.png", &out).unwrap();
     }
 }

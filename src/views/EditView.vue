@@ -41,12 +41,19 @@ const currentBgModelId = ref('')
 
 const downloadedBgModels = computed(() => bgModels.value.filter(m => m.downloaded))
 
-// ── 去水印（LaMa 本地修复）──
+// ── 智能擦除（LaMa 本地修复）──
 const inpaintModels = ref<InpaintModelEntry[]>([])
 const inpaintDownloading = ref(false)
 const inpaintPct = ref(0)
-// 修复选区（画面百分比），默认覆盖右下角"千问AI生成"类水印
+// 擦除方式：涂抹（笔刷遮罩）/ 选区（矩形框，默认覆盖右下角"千问AI生成"类水印）
+const eraseMode = ref<'brush' | 'rect'>('brush')
 const wmRect = ref({ x: 60, y: 84, w: 40, h: 16 })
+const eraseBrushSize = ref(48) // 笔刷直径（图像像素）
+const eraseCanvas = ref<HTMLCanvasElement>() // 显示画布：红色半透明涂抹痕迹
+let eraseMask: HTMLCanvasElement | null = null // 离屏遮罩：黑底白涂抹，发给后端
+let erasePainting = false
+let lastErasePt: { x: number; y: number } | null = null
+let eraseHasStroke = false
 
 // ── 抠图引擎（local 本地模型 / cloud 云端 remove.bg）──
 const engine = ref<'local' | 'cloud'>('local')
@@ -153,6 +160,11 @@ function zoomBy(factor: number) {
 function onCanvasMouseDown(e: MouseEvent) {
   if (e.button !== 0) return
   if (touchupActive.value) return // 触摸画布自己处理
+  // 智能擦除涂抹模式：画遮罩，不平移
+  if (activeTool.value === 'watermark' && eraseMode.value === 'brush') {
+    startEraseStroke(e)
+    return
+  }
   // 吸色模式：点击画布拾取像素颜色（写入 eyedropperTarget 指定的颜色）
   if (eyedropperActive.value) {
     pickColorAt(e.clientX, e.clientY)
@@ -197,6 +209,11 @@ function pickColorAt(screenX: number, screenY: number) {
 
 function onCanvasMouseMove(e: MouseEvent) {
   if (touchupActive.value) return // 触摸画布自己处理
+  // 智能擦除涂抹模式：继续画遮罩，不平移
+  if (activeTool.value === 'watermark' && eraseMode.value === 'brush') {
+    continueEraseStroke(e)
+    return
+  }
   // 吸色态：更新吸管光标位置 + 刷新放大镜（DOM 跟随，丝滑），不参与平移
   if (eyedropperActive.value) {
     const rect = canvasRef.value?.getBoundingClientRect()
@@ -248,6 +265,7 @@ function drawLoupe(cx: number, cy: number, _rect: DOMRect) {
 }
 
 function onCanvasMouseUp() {
+  if (erasePainting) endEraseStroke()
   isPanning.value = false
 }
 
@@ -276,7 +294,7 @@ const toolGroups: { label: string; items: { id: ToolId; name: string; icon: stri
   {
     label: '调整',
     items: [
-      { id: 'watermark', name: '去水印', icon: 'BrushFilled' },
+      { id: 'watermark', name: '智能擦除', icon: 'BrushFilled' },
       { id: 'edgeRefine', name: '边缘净化', icon: 'Filter' },
       { id: 'shapeMask', name: '形状遮罩', icon: 'PieChart' },
       { id: 'adjustColor', name: '调色', icon: 'Sunny' },
@@ -315,6 +333,10 @@ function selectTool(tool: ToolId) {
   // 进入修补工具时初始化修补画布（设尺寸 + 画底图）
   if (willActivate && tool === 'touchup') {
     initTouchupCanvas()
+  }
+  // 进入智能擦除工具时初始化涂抹画布与遮罩
+  if (willActivate && tool === 'watermark') {
+    initEraseCanvas()
   }
   // 工具切换后让图片重新居中适配（用户可能在别的工具下拖动/缩放过）
   nextTick(() => requestAnimationFrame(fitToCanvas))
@@ -1045,13 +1067,98 @@ async function handleAdjustColor() {
   } catch (e: any) { ElMessage.error(`调色失败：${e?.message || e}`) } finally { processing.value = false }
 }
 
-// ── 去水印（LaMa 本地修复）──
+// ── 智能擦除（LaMa 本地修复）──
 async function loadInpaintModels() {
   try {
     inpaintModels.value = await listInpaintModels()
   } catch (e: any) {
-    console.error('加载修复模型清单失败:', e)
+    console.error('加载擦除模型清单失败:', e)
   }
+}
+
+/** 进入智能擦除工具时初始化显示画布与离屏遮罩（黑底） */
+function initEraseCanvas() {
+  nextTick(() => {
+    const ec = eraseCanvas.value
+    if (!ec || !imgNatural.value.w) return
+    ec.width = imgNatural.value.w
+    ec.height = imgNatural.value.h
+    ec.getContext('2d')!.clearRect(0, 0, ec.width, ec.height)
+    eraseMask = document.createElement('canvas')
+    eraseMask.width = ec.width
+    eraseMask.height = ec.height
+    const mctx = eraseMask.getContext('2d')!
+    mctx.fillStyle = '#000'
+    mctx.fillRect(0, 0, eraseMask.width, eraseMask.height)
+    eraseHasStroke = false
+    lastErasePt = null
+  })
+}
+
+function clearErase() {
+  const ec = eraseCanvas.value
+  if (ec) ec.getContext('2d')!.clearRect(0, 0, ec.width, ec.height)
+  if (eraseMask) {
+    const mctx = eraseMask.getContext('2d')!
+    mctx.fillStyle = '#000'
+    mctx.fillRect(0, 0, eraseMask.width, eraseMask.height)
+  }
+  eraseHasStroke = false
+  lastErasePt = null
+}
+
+/** 屏幕坐标 → 图像像素坐标（同 touchup：容器 rect 手动减 pan、除 scale） */
+function erasePt(e: MouseEvent) {
+  const rect = canvasRef.value?.getBoundingClientRect()
+  if (!rect) return null
+  return {
+    x: (e.clientX - rect.left - panX.value) / scale.value,
+    y: (e.clientY - rect.top - panY.value) / scale.value,
+  }
+}
+
+/** 单笔触：显示画布画红色痕迹，离屏遮罩画白色轨迹（后端白=擦除） */
+function strokeErase(e: MouseEvent) {
+  const ec = eraseCanvas.value
+  const m = eraseMask
+  if (!ec || !m) return
+  const pt = erasePt(e)
+  if (!pt) return
+  const prev = lastErasePt
+  lastErasePt = pt
+  const r = eraseBrushSize.value / 2
+  const layers: [CanvasRenderingContext2D, string][] = [
+    [ec.getContext('2d')!, 'rgba(220, 40, 40, 0.5)'],
+    [m.getContext('2d')!, '#fff'],
+  ]
+  for (const [ctx, color] of layers) {
+    ctx.strokeStyle = color
+    ctx.lineWidth = r * 2
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    ctx.beginPath()
+    if (prev) ctx.moveTo(prev.x, prev.y)
+    else ctx.moveTo(pt.x - r, pt.y)
+    ctx.lineTo(pt.x, pt.y)
+    ctx.stroke()
+  }
+  eraseHasStroke = true
+}
+
+function startEraseStroke(e: MouseEvent) {
+  erasePainting = true
+  lastErasePt = null
+  strokeErase(e)
+}
+
+function continueEraseStroke(e: MouseEvent) {
+  if (!erasePainting) return
+  strokeErase(e)
+}
+
+function endEraseStroke() {
+  erasePainting = false
+  lastErasePt = null
 }
 
 async function handleDownloadInpaintModel() {
@@ -1069,19 +1176,28 @@ async function handleInpaint() {
   const model = inpaintModels.value.find(x => x.downloaded)
   if (!model) {
     try {
-      await ElMessageBox.confirm('修复模型未下载（约 208MB，仅首次），是否下载？', '下载模型', {
+      await ElMessageBox.confirm('擦除模型未下载（约 208MB，仅首次），是否下载？', '下载模型', {
         confirmButtonText: '下载', cancelButtonText: '取消', type: 'info'
       })
     } catch { return }
     await handleDownloadInpaintModel()
     if (!inpaintModels.value.some(x => x.downloaded)) return
   }
+  // 涂抹模式导出遮罩（白=擦除）；选区模式传矩形
+  let mask: string | undefined
+  if (eraseMode.value === 'brush') {
+    if (!eraseHasStroke || !eraseMask) {
+      ElMessage.warning('请先在图上涂抹要擦除的区域')
+      return
+    }
+    mask = eraseMask.toDataURL('image/png').split(',')[1]
+  }
   pushHistory(); processing.value = true
   try {
     const { x, y, w, h } = wmRect.value
-    syncImage(await inpaintRegion({ image: image.value, x: x / 100, y: y / 100, w: w / 100, h: h / 100 }))
-    ElMessage.success('去水印完成')
-  } catch (e: any) { ElMessage.error(`去水印失败：${e?.message || e}`) } finally { processing.value = false }
+    syncImage(await inpaintRegion({ image: image.value, x: x / 100, y: y / 100, w: w / 100, h: h / 100, mask }))
+    ElMessage.success('擦除完成')
+  } catch (e: any) { ElMessage.error(`擦除失败：${e?.message || e}`) } finally { processing.value = false }
 }
 
 // ── computed ──
@@ -1222,7 +1338,7 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
         v-else
         ref="canvasRef"
         class="canvas"
-        :class="{ 'canvas-eyedropper': eyedropperActive }"
+        :class="{ 'canvas-eyedropper': eyedropperActive, 'canvas-erase': activeTool === 'watermark' && eraseMode === 'brush' }"
         v-loading="processing"
         @wheel="onCanvasWheel"
         @mousedown="onCanvasMouseDown"
@@ -1234,9 +1350,16 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
         <div class="canvas-bg checkerboard" />
         <img :src="toDataUrl(image)" class="canvas-img" :style="{ transform: imageTransform, ...shapeClipStyle }" draggable="false" />
 
-        <!-- 去水印选区框（跟随图片 transform，百分比定位） -->
+        <!-- 智能擦除：涂抹痕迹显示层（跟随图片 transform） -->
+        <canvas
+          v-show="activeTool === 'watermark'"
+          ref="eraseCanvas"
+          class="erase-canvas"
+          :style="{ transform: imageTransform, transformOrigin: '0 0' }"
+        />
+        <!-- 智能擦除：选区框（仅选区模式，跟随图片 transform，百分比定位） -->
         <div
-          v-if="activeTool === 'watermark' && imgNatural.w"
+          v-if="activeTool === 'watermark' && eraseMode === 'rect' && imgNatural.w"
           class="wm-overlay"
           :style="{ transform: imageTransform, width: imgNatural.w + 'px', height: imgNatural.h + 'px' }"
         >
@@ -1392,10 +1515,10 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
           </template>
         </div>
 
-        <!-- 去水印 -->
+        <!-- 智能擦除 -->
         <div v-else-if="activeTool === 'watermark'" class="drawer-section">
           <div class="bg-model-picker">
-            <span class="tool-desc">修复模型</span>
+            <span class="tool-desc">擦除模型</span>
             <el-select
               :model-value="(inpaintModels.find(m => m.downloaded) || inpaintModels[0])?.id"
               size="small"
@@ -1416,7 +1539,7 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
             @click="handleDownloadInpaintModel"
             style="width:100%; margin-top:8px"
           >
-            {{ inpaintDownloading ? `下载中 ${inpaintPct}%` : '下载修复模型' }}
+            {{ inpaintDownloading ? `下载中 ${inpaintPct}%` : '下载擦除模型' }}
           </el-button>
           <el-progress
             v-if="inpaintDownloading"
@@ -1426,26 +1549,43 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
           />
 
           <el-divider />
-          <span class="tool-desc">修复选区（画面百分比）</span>
-          <div class="param" style="margin-top:6px">
-            <span class="tool-desc">左边距：{{ wmRect.x }}%</span>
-            <el-slider v-model="wmRect.x" :min="0" :max="99" size="small" />
-          </div>
-          <div class="param">
-            <span class="tool-desc">上边距：{{ wmRect.y }}%</span>
-            <el-slider v-model="wmRect.y" :min="0" :max="99" size="small" />
-          </div>
-          <div class="param">
-            <span class="tool-desc">宽度：{{ wmRect.w }}%</span>
-            <el-slider v-model="wmRect.w" :min="1" :max="100" size="small" />
-          </div>
-          <div class="param">
-            <span class="tool-desc">高度：{{ wmRect.h }}%</span>
-            <el-slider v-model="wmRect.h" :min="1" :max="100" size="small" />
-          </div>
-          <div class="btn-row" style="margin-top:4px">
-            <el-button size="small" @click="wmRect = { x: 60, y: 84, w: 40, h: 16 }">右下角水印预设</el-button>
-          </div>
+          <el-radio-group v-model="eraseMode" size="small" style="width:100%">
+            <el-radio-button value="brush">涂抹</el-radio-button>
+            <el-radio-button value="rect">选区</el-radio-button>
+          </el-radio-group>
+
+          <template v-if="eraseMode === 'brush'">
+            <div class="param" style="margin-top:8px">
+              <span class="tool-desc">笔刷大小：{{ eraseBrushSize }}px</span>
+              <el-slider v-model="eraseBrushSize" :min="10" :max="200" size="small" />
+            </div>
+            <div class="btn-row" style="margin-top:4px">
+              <el-button size="small" :disabled="!eraseHasStroke" @click="clearErase">清空涂抹</el-button>
+            </div>
+            <p class="tool-desc">在画布上涂抹要擦除的内容（水印、文字、小杂物）</p>
+          </template>
+          <template v-else>
+            <span class="tool-desc">擦除选区（画面百分比）</span>
+            <div class="param" style="margin-top:6px">
+              <span class="tool-desc">左边距：{{ wmRect.x }}%</span>
+              <el-slider v-model="wmRect.x" :min="0" :max="99" size="small" />
+            </div>
+            <div class="param">
+              <span class="tool-desc">上边距：{{ wmRect.y }}%</span>
+              <el-slider v-model="wmRect.y" :min="0" :max="99" size="small" />
+            </div>
+            <div class="param">
+              <span class="tool-desc">宽度：{{ wmRect.w }}%</span>
+              <el-slider v-model="wmRect.w" :min="1" :max="100" size="small" />
+            </div>
+            <div class="param">
+              <span class="tool-desc">高度：{{ wmRect.h }}%</span>
+              <el-slider v-model="wmRect.h" :min="1" :max="100" size="small" />
+            </div>
+            <div class="btn-row" style="margin-top:4px">
+              <el-button size="small" @click="wmRect = { x: 60, y: 84, w: 40, h: 16 }">右下角水印预设</el-button>
+            </div>
+          </template>
 
           <el-button
             type="primary"
@@ -1453,9 +1593,9 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
             @click="handleInpaint"
             style="width:100%; margin-top:8px"
           >
-            <el-icon><BrushFilled /></el-icon> 开始修复
+            <el-icon><BrushFilled /></el-icon> 开始擦除
           </el-button>
-          <p class="tool-desc">选区外像素不变；适合右下角固定水印（如"千问AI生成"）</p>
+          <p class="tool-desc">仅替换擦除区像素，其余不变；需已下载擦除模型</p>
         </div>
 
         <!-- 智能裁剪 -->
@@ -1601,6 +1741,7 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
 .canvas:active { cursor: grabbing; }
 /* 吸色模式：隐藏系统光标，用 DOM 吸管元素跟随（比 SVG cursor 丝滑） */
 .canvas-eyedropper, .canvas-eyedropper:active { cursor: none; }
+.canvas-erase { cursor: crosshair; }
 /* 吸管光标：绝对定位跟随鼠标，尖端对准鼠标点 */
 .eyedropper-cursor {
   position: absolute; pointer-events: none; z-index: 20;
@@ -1631,6 +1772,9 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
   background: rgba(64, 158, 255, 0.15);
   box-sizing: border-box;
 }
+
+/* 智能擦除涂抹痕迹层（容器统一接事件，画布不拦截鼠标） */
+.erase-canvas { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 3; }
 .shape-grid-h { position: absolute; left: 0; right: 0; border-top: 1px dashed rgba(255,255,255,0.7); }
 .shape-grid-v { position: absolute; top: 0; bottom: 0; border-left: 1px dashed rgba(255,255,255,0.7); }
 
