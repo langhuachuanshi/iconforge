@@ -38,7 +38,7 @@ const mascotColorMode = ref<"auto" | "custom">("auto"); // 三色：AI 自动 / 
 const mascotC1 = ref("#FF8A3D"); // 主色①
 const mascotC2 = ref("#2F6BFF"); // 主色②
 const mascotBg = ref("#F5EFE6"); // 背景色
-const mascotCorner = ref<"left" | "right" | "both">("both"); // 出现角落，左右交替时奇左偶右
+const mascotCorner = ref<"center" | "left" | "right">("center"); // 出现位置，批量内统一
 const mascotExtra = ref(""); // 补充描述
 
 // EP 颜色选择器在清空按钮/无效输入确认时会 emit null（官方要求 v-model 为 string），
@@ -79,17 +79,13 @@ const mascotPrompts = computed<string[]>(() => {
     extra: mascotExtra.value.trim() || undefined,
   };
   const n = Math.min(Math.max(genCount.value, 1), 2);
-  return Array.from({ length: n }, (_, i) => {
-    const corner =
-      mascotCorner.value === "both"
-        ? i % 2 === 0
-          ? "lower-left"
-          : "lower-right"
-        : mascotCorner.value === "left"
-          ? "lower-left"
-          : "lower-right";
-    return buildMascotPrompt(params, corner);
-  });
+  const position =
+    mascotCorner.value === "center"
+      ? "center"
+      : mascotCorner.value === "left"
+        ? "lower-left"
+        : "lower-right";
+  return Array.from({ length: n }, () => buildMascotPrompt(params, position));
 });
 
 // ── 背景可视化 ──
@@ -366,7 +362,7 @@ async function handleGenerate() {
 
   const isExpert = promptMode.value === "expert";
   const isMascot = promptMode.value === "mascot";
-  // 吉祥物：逐张提示词（角落交替）；张数与其他模式统一由 genCount 决定
+  // 吉祥物：逐张提示词（出现位置统一）；张数与其他模式统一由 genCount 决定
   const mascotList = isMascot ? mascotPrompts.value : null;
   const baseParams = {
     concept: isMascot ? mascotSubject.value : isExpert ? "" : concept.value,
@@ -611,10 +607,10 @@ function copyFullPrompt() {
                 </div>
               </el-form-item>
 
-              <div class="step"><span class="step-num">4</span> 出现角落</div>
+              <div class="step"><span class="step-num">4</span> 出现位置</div>
               <el-form-item>
                 <el-select v-model="mascotCorner" style="width: 100%">
-                  <el-option value="both" label="左右交替（多张时奇左偶右）" />
+                  <el-option value="center" label="居中" />
                   <el-option value="left" label="左下探出" />
                   <el-option value="right" label="右下探出" />
                 </el-select>
@@ -901,13 +897,13 @@ function copyFullPrompt() {
                   负向：{{ negativePrompt.trim() }}
                 </p>
                 <p v-if="promptMode === 'mascot'" class="neg-preview">
-                  共 {{ mascotPrompts.length }} 张候选：{{
-                    mascotCorner === "both"
-                      ? "奇数张左下、偶数张右下，仅出现角落不同"
+                  共 {{ mascotPrompts.length }} 张候选：同一提示词独立随机出图（{{
+                    mascotCorner === "center"
+                      ? "居中"
                       : mascotCorner === "left"
-                        ? "全部左下探出"
-                        : "全部右下探出"
-                  }}
+                        ? "左下探出"
+                        : "右下探出"
+                  }}）
                 </p>
               </el-collapse-item>
             </el-collapse>

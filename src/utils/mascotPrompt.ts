@@ -18,8 +18,8 @@ export interface MascotPromptParams {
   extra?: string
 }
 
-/** 组装单张完整提示词；corner 是批量内唯一变量（skill：奇数张左下、偶数张右下） */
-export function buildMascotPrompt(p: MascotPromptParams, corner: 'lower-left' | 'lower-right'): string {
+/** 组装单张完整提示词；position 是批量内统一的出现位置 */
+export function buildMascotPrompt(p: MascotPromptParams, position: 'center' | 'lower-left' | 'lower-right'): string {
   const subject = p.subject || 'cute character'
   const custom = p.colorMode === 'custom'
   const bgDesc = custom
@@ -28,13 +28,22 @@ export function buildMascotPrompt(p: MascotPromptParams, corner: 'lower-left' | 
   const colorLine = custom
     ? `Use ${p.color1} and ${p.color2} as the two IP base colors`
     : 'Choose the two IP colors from the subject and context'
+  // 居中时 skill 允许（用户显式选择）：去掉角落占据与"禁止居中"措辞
+  const bgLine =
+    position === 'center'
+      ? `Background: fill the entire square with ${bgDesc}. Keep this background visible in every open area and in the corners not occupied by the character.`
+      : `Background: fill the entire square with ${bgDesc}. Keep this background visible in every open area and in the corners not occupied by the character; the ${position} corner must be occupied by the character.`
+  const compositionLine =
+    position === 'center'
+      ? 'Composition: keep the character upright and centered on the background, filling about 85-95% of the square so it remains visually dominant. Preserve both paired identifying features.'
+      : `Composition: keep the character upright and emerging from the ${position} corner, filling about 85-95% of the square so it remains visually dominant. Cropping at the bottom or assigned side is welcome when it strengthens the corner emergence. Preserve both paired identifying features. Never center or bottom-center the character.`
   return [
     'Create one complete full-bleed 1:1 square image.',
-    `Background: fill the entire square with ${bgDesc}. Keep this background visible in every open area and in the corners not occupied by the character; the ${corner} corner must be occupied by the character.`,
+    bgLine,
     `Subject: place one extremely simplified, cute, endearing ${subject} IP character on the background, reduced to one soft rounded continuous silhouette and one defining feature${p.feature ? ` (${p.feature})` : ''}.`,
     'Complexity: use only 4-7 large basic shapes and at most two broad internal color regions. Use two simple eyes and add one tiny mouth only when it helps the expression. Remove every nonessential line, outline, anatomical detail, texture, and decoration. Keep the character readable at 32 x 32.',
     `Color behavior: use exactly three semantic colors in the complete image: exactly two IP base colors plus the background color. ${colorLine}, organize both into broad purposeful masses, and reuse them for facial marks. Keep the IP, facial marks, and background clearly separated.`,
-    `Composition: keep the character upright and emerging from the ${corner} corner, filling about 85-95% of the square so it remains visually dominant. Cropping at the bottom or assigned side is welcome when it strengthens the corner emergence. Preserve both paired identifying features. Never center or bottom-center the character.`,
+    compositionLine,
     'Style: make simplification, cuteness, and lovable baby-like appeal the strongest qualities. Use large soft forms, compact proportions, thick rounded contours, and an ultra-clean graphic treatment. Prefer one clear shape over several explanatory details. Add an extremely, extremely subtle, almost imperceptible sense of depth through a barely-there neo-skeuomorphic treatment.',
     'Finish: show only the character on the full-canvas background, with clean surfaces and normal square outer corners.',
     ...(p.extra ? [`Additional notes: ${p.extra}.`] : []),
