@@ -94,6 +94,17 @@ struct OssSts {
     security_token: String,
 }
 
+/// 探活：仅调 GetOssStsToken 验证 AK/SK 签名（免费），不产生抠图调用
+pub async fn probe(
+    access_key_id: &str,
+    access_key_secret: &str,
+    logger: &Logger,
+) -> Result<(), AppError> {
+    get_oss_sts_token(access_key_id, access_key_secret, logger)
+        .await
+        .map(|_| ())
+}
+
 async fn get_oss_sts_token(ak: &str, sk: &str, logger: &Logger) -> Result<OssSts, AppError> {
     let params = [("RegionId", "cn-shanghai".to_string())];
     let (headers, url) = aliyun_sign::build_v3_request(

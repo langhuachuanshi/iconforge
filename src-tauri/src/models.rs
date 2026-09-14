@@ -69,11 +69,15 @@ pub struct GenerateResponse {
     pub icon_id: String,
 }
 
-/// 服务商测试连接结果
+/// 服务商测试连接结果（探活，不真实生成）
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestProviderResult {
     pub latency_ms: u64,
+    /// reachable / auth_failed / network_error / server_error
+    pub verdict: String,
+    pub http_status: Option<u16>,
+    pub detail: String,
     pub model: String,
     pub size: String,
 }

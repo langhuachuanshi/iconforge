@@ -65,6 +65,7 @@ pub fn run() {
             commands::generate::get_templates,
             commands::generate::generate_icon,
             commands::generate::test_provider,
+            commands::edit::test_aliyun_matting,
             commands::config::get_config,
             commands::config::set_config,
             commands::config::list_providers,

@@ -107,12 +107,19 @@ export async function generateIcon(params: GenerateParams): Promise<GenerateResu
 
 export interface TestProviderResult {
   latency_ms: number
+  verdict: 'reachable' | 'auth_failed' | 'network_error' | 'server_error'
+  http_status: number | null
+  detail: string
   model: string
   size: string
 }
 
 export function testProvider(providerId: string): Promise<TestProviderResult> {
   return invoke('test_provider', { providerId })
+}
+
+export function testAliyunMatting(): Promise<number> {
+  return invoke('test_aliyun_matting')
 }
 
 export async function cropImage(params: CropParams): Promise<string> {

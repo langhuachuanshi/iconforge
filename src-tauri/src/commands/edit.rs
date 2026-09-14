@@ -215,6 +215,27 @@ pub async fn remove_background_cloud(
     })
 }
 
+/// 测试阿里云云端抠图配置（GetOssStsToken 探活，验证 AK/SK 签名，不产生抠图费用），返回耗时 ms
+#[tauri::command]
+pub async fn test_aliyun_matting(state: State<'_, AppState>) -> Result<u64, AppError> {
+    let (ak, sk) = {
+        let storage = state.storage.lock();
+        (
+            storage.get_config("aliyun_ak", ""),
+            storage.get_config("aliyun_sk", ""),
+        )
+    };
+    if ak.trim().is_empty() || sk.trim().is_empty() {
+        return Err(AppError::ProviderError(
+            "未配置阿里云 AccessKey / Secret".into(),
+        ));
+    }
+    let start = std::time::Instant::now();
+    let logger = |_msg: &str| {};
+    services::aliyun_imageseg::probe(&ak, &sk, &logger).await?;
+    Ok(start.elapsed().as_millis() as u64)
+}
+
 /// 按颜色去底（魔棒/色键）
 #[tauri::command]
 pub async fn remove_color(req: RemoveColorRequest) -> Result<ImageResponse, AppError> {

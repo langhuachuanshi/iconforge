@@ -124,7 +124,7 @@ pub async fn generate_icon(
     })
 }
 
-/// 测试服务商连接：以支持的最小尺寸发一次最小生成请求，返回耗时
+/// 测试服务商连接（零成本探活）：发无效模型名探测网络/鉴权状态，不真实生成
 #[tauri::command]
 pub async fn test_provider(
     state: State<'_, AppState>,
@@ -138,31 +138,14 @@ pub async fn test_provider(
             .ok_or_else(|| AppError::NotFound(format!("服务商 {} 不存在", provider_id)))?
     };
 
-    // 取面积最小的支持尺寸，尽量降低测试成本
-    let size = parse_supported_sizes(&config.supported_sizes)
-        .into_iter()
-        .min_by_key(|s| {
-            let mut it = s.splitn(2, 'x');
-            let w: u64 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-            let h: u64 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-            w.saturating_mul(h)
-        })
-        .unwrap_or_else(|| "1024x1024".into());
-
-    let start = std::time::Instant::now();
-    let result = OpenAiProvider::generate(
-        &config,
-        "a simple flat icon of a red circle on white background",
-        &size,
-        None,
-        None,
-    )
-    .await?;
-    let latency_ms = start.elapsed().as_millis() as u64;
-    drop(result);
+    let size = parse_supported_sizes(&config.supported_sizes)[0].clone();
+    let probe = OpenAiProvider::probe(&config, &size).await;
 
     Ok(TestProviderResult {
-        latency_ms,
+        latency_ms: probe.latency_ms,
+        verdict: probe.verdict.into(),
+        http_status: probe.http_status,
+        detail: probe.detail,
         model: config.model.clone(),
         size,
     })

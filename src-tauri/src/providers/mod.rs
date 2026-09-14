@@ -18,9 +18,100 @@ pub struct GenerateResult {
     pub format: String,
 }
 
+/// 探活结果：verdict = reachable / auth_failed / network_error / server_error
+pub struct ProbeResult {
+    pub verdict: &'static str,
+    pub http_status: Option<u16>,
+    pub detail: String,
+    pub latency_ms: u64,
+}
+
 pub struct OpenAiProvider;
 
 impl OpenAiProvider {
+    /// 连接探活（零成本）：用故意无效的模型名发最小请求。
+    /// 服务商先校验鉴权再校验模型，因此可按状态码判定：
+    /// 网络错误=不通；401/403=Key 无效；5xx=服务商故障；其余 4xx=连通且鉴权通过。
+    pub async fn probe(config: &ProviderEntry, size: &str) -> ProbeResult {
+        let start = std::time::Instant::now();
+        let finish = |verdict: &'static str, status, detail: String| ProbeResult {
+            verdict,
+            http_status: status,
+            detail,
+            latency_ms: start.elapsed().as_millis() as u64,
+        };
+
+        let api_key = config.api_key.trim();
+        if api_key.is_empty() {
+            return finish("auth_failed", None, "API Key 未配置".into());
+        }
+
+        let client = match Client::builder().timeout(Duration::from_secs(20)).build() {
+            Ok(c) => c,
+            Err(e) => return finish("network_error", None, e.to_string()),
+        };
+
+        // 与 generate 相同的三种端点协议，但模型名故意无效
+        let is_maas = config.endpoint.contains("maas");
+        let is_dashscope = !is_maas && config.endpoint.contains("dashscope");
+        let (url, body) = if is_maas {
+            (
+                format!(
+                    "{}/api/v1/services/aigc/multimodal-generation/generation",
+                    config.endpoint.trim_end_matches('/')
+                ),
+                serde_json::json!({
+                    "model": "__connectivity_probe__",
+                    "input": { "messages": [{ "role": "user", "content": [{ "text": "probe" }] }] },
+                    "parameters": { "size": "512*512" }
+                }),
+            )
+        } else if is_dashscope {
+            (
+                "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
+                    .to_string(),
+                serde_json::json!({
+                    "model": "__connectivity_probe__",
+                    "input": { "prompt": "probe" },
+                    "parameters": { "size": "512*512", "n": 1 }
+                }),
+            )
+        } else {
+            (
+                config.endpoint.trim().to_string(),
+                serde_json::json!({
+                    "model": "__connectivity_probe__",
+                    "prompt": "probe",
+                    "n": 1,
+                    "size": size
+                }),
+            )
+        };
+
+        let mut req = client
+            .post(url)
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Content-Type", "application/json")
+            .json(&body);
+        if is_dashscope {
+            req = req.header("X-DashScope-Async", "enable");
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => return finish("network_error", None, e.to_string()),
+        };
+
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        let verdict = match status {
+            401 | 403 => "auth_failed",
+            500..=599 => "server_error",
+            _ => "reachable",
+        };
+        finish(verdict, Some(status), trunc(&text, 200))
+    }
+
     pub async fn generate(
         config: &ProviderEntry,
         prompt: &str,

@@ -17,6 +17,7 @@ import {
   getConfig,
   setConfig,
   testProvider,
+  testAliyunMatting,
   type ProviderEntry,
   type ProviderUpsertRequest,
   type BgModelEntry,
@@ -216,19 +217,55 @@ async function handleToggle(row: ProviderEntry) {
   }
 }
 
-// 测试连接：发一次最小生成请求，成功报耗时，失败透出服务商原始错误
+// 测试连接：零成本探活（不真实生成），按状态码判定网络/鉴权状态
 const testingId = ref('')
 async function handleTest(row: ProviderEntry) {
   if (testingId.value) return
   testingId.value = row.id
   try {
     const r = await testProvider(row.id)
-    ElMessage.success(`${row.name} 连接正常 · ${r.model || '默认模型'} · ${r.size} · ${(r.latency_ms / 1000).toFixed(1)}s`)
+    if (r.verdict === 'reachable') {
+      const extra =
+        r.http_status && r.http_status >= 400
+          ? `（服务响应 ${r.http_status}，模型可用性以实际生成为准）`
+          : ''
+      ElMessage.success(`${row.name} 探活成功 · 网络通、Key 有效 · ${r.latency_ms}ms${extra}`)
+    } else if (r.verdict === 'auth_failed') {
+      ElMessage.error({
+        message: `${row.name} 探活失败：API Key 无效或已过期（HTTP ${r.http_status}）${r.detail}`,
+        duration: 8000,
+        showClose: true,
+      })
+    } else if (r.verdict === 'network_error') {
+      ElMessage.error({ message: `${row.name} 探活失败：网络不通 · ${r.detail}`, duration: 8000, showClose: true })
+    } else {
+      ElMessage.error({
+        message: `${row.name} 探活失败：服务商服务异常（HTTP ${r.http_status}）${r.detail}`,
+        duration: 8000,
+        showClose: true,
+      })
+    }
   } catch (e: any) {
     const detail = typeof e === 'string' ? e : e?.message || JSON.stringify(e)
-    ElMessage.error({ message: `${row.name} 连接失败：${detail}`, duration: 8000, showClose: true })
+    ElMessage.error({ message: `${row.name} 探活失败：${detail}`, duration: 8000, showClose: true })
   } finally {
     testingId.value = ''
+  }
+}
+
+// 云端抠图探活：仅验证 AK/SK 签名
+const testingAliyun = ref(false)
+async function handleTestAliyun() {
+  if (testingAliyun.value) return
+  testingAliyun.value = true
+  try {
+    const ms = await testAliyunMatting()
+    ElMessage.success(`阿里云分割抠图连接正常 · ${(ms / 1000).toFixed(1)}s`)
+  } catch (e: any) {
+    const detail = typeof e === 'string' ? e : e?.message || JSON.stringify(e)
+    ElMessage.error({ message: `阿里云连接失败：${detail}`, duration: 8000, showClose: true })
+  } finally {
+    testingAliyun.value = false
   }
 }
 
@@ -421,6 +458,13 @@ async function openLocation(id: string) {
               </div>
             </div>
             <div class="row-actions">
+              <el-button
+                text
+                size="small"
+                type="primary"
+                :loading="testingAliyun"
+                @click="handleTestAliyun"
+              >测试</el-button>
               <el-button text size="small" type="primary" @click="aliyunDialogVisible = true">设置</el-button>
             </div>
           </div>
