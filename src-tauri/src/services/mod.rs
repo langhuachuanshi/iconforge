@@ -7,3 +7,4 @@ pub mod aliyun_imageseg;
 pub mod extract;
 pub mod convert;
 pub mod inpaint;
+pub mod model_registry;

@@ -8,121 +8,34 @@ use tokio::io::AsyncWriteExt;
 use crate::error::AppError;
 use crate::models::BgDownloadProgress;
 
-/// 归一化策略（严格对应各模型官方预处理）
-#[derive(Clone, Copy, Debug)]
-pub enum Norm {
-    /// ImageNet: (x/255 - mean) / std，RMBG 用
-    ImageNet,
-    /// 仅 /255 → [0,1]，CrispCut 用
-    UnitOnly,
-    /// x/255 - 0.5 → [-0.5, 0.5]，ISNet 用
-    Centered,
-}
+pub use crate::services::model_registry::Norm;
 
-/// 可用模型定义
-pub struct BgModel {
-    pub id: &'static str,
-    pub name: &'static str,
-    pub url: &'static str,
-    pub filename: &'static str,
-    pub size: &'static str,
-    /// 归一化策略
-    pub norm: Norm,
-    /// true=模型输出已 sigmoid（RMBG/ISNet）；false=输出是 logits，需手动 sigmoid（CrispCut）
-    pub sigmoid_output: bool,
-    /// ONNX 输入张量名（找不到时回退到首个输入）
-    pub input_name: &'static str,
-}
-
-pub const BG_MODELS: &[BgModel] = &[
-    BgModel {
-        id: "crispcut-quality",
-        name: "CrispCut（推荐）",
-        url: "https://hf-mirror.com/bowespublishing/crisp-cut/resolve/main/onnx/crispcut-quality.onnx",
-        filename: "crispcut-quality.onnx",
-        size: "约 25MB",
-        norm: Norm::UnitOnly,
-        sigmoid_output: false,
-        input_name: "input",
-    },
-    BgModel {
-        id: "crispcut-fast",
-        name: "CrispCut-快速版",
-        url: "https://hf-mirror.com/bowespublishing/crisp-cut/resolve/main/onnx/crispcut-fast.onnx",
-        filename: "crispcut-fast.onnx",
-        size: "约 6.5MB",
-        norm: Norm::UnitOnly,
-        sigmoid_output: false,
-        input_name: "input",
-    },
-    BgModel {
-        id: "rmbg-1.4",
-        name: "RMBG-1.4",
-        url: "https://modelscope.cn/models/briaai/RMBG-1.4/resolve/master/onnx/model.onnx",
-        filename: "rmbg-1.4.onnx",
-        size: "约 40MB",
-        norm: Norm::ImageNet,
-        sigmoid_output: true,
-        input_name: "input",
-    },
-    BgModel {
-        id: "rmbg-2.0",
-        name: "RMBG-2.0",
-        url: "https://modelscope.cn/models/briaai/RMBG-2.0/resolve/master/onnx/model.onnx",
-        filename: "rmbg-2.0.onnx",
-        size: "约 176MB",
-        norm: Norm::ImageNet,
-        sigmoid_output: true,
-        input_name: "input",
-    },
-    BgModel {
-        id: "isnet-general-use",
-        name: "ISNet (ModelScope)",
-        url: "https://hf-mirror.com/x-Liola-x/isnet-general-use-onnx/resolve/main/isnet-general-use.onnx",
-        filename: "isnet-general-use.onnx",
-        size: "约 176MB",
-        norm: Norm::Centered,
-        sigmoid_output: true,
-        input_name: "input",
-    },
-];
-
-const DEFAULT_MODEL: &str = "crispcut-quality";
-
-pub fn get_model(id: &str) -> &'static BgModel {
-    BG_MODELS.iter().find(|m| m.id == id).unwrap_or(&BG_MODELS[0])
-}
+// 模型种子已迁至 model_registry.rs（内置 + 自定义统一注册表）
 
 /// 模型文件路径（存储在 models/ 子目录）
 pub fn model_path(base_dir: &Path, filename: &str) -> PathBuf {
     base_dir.join("models").join(filename)
 }
 
-/// 检查模型是否已下载（默认模型）
-pub fn model_exists(model_dir: &Path, model_id: &str) -> bool {
-    let m = get_model(model_id);
-    model_path(model_dir, m.filename).exists()
-}
-
-/// 下载指定模型
+/// 下载指定模型（url/filename 来自注册表条目）
 pub async fn download_model(
     window: &tauri::Window,
     model_dir: &Path,
-    model_id: &str,
+    filename: &str,
+    url: &str,
 ) -> Result<(), AppError> {
-    let m = get_model(model_id);
-    let target = model_path(model_dir, m.filename);
+    let target = model_path(model_dir, filename);
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    let tmp_path = model_dir.join(format!("{}.tmp", m.filename));
+    let tmp_path = model_dir.join(format!("{filename}.tmp"));
 
     let client = Client::builder()
         .timeout(Duration::from_secs(600))
         .build()?;
 
-    let resp = client.get(m.url).header("User-Agent", "IconForge/1.0").send().await?;
+    let resp = client.get(url).header("User-Agent", "IconForge/1.0").send().await?;
     if !resp.status().is_success() {
         return Err(AppError::Http(format!("模型下载失败 (HTTP {})", resp.status().as_u16())));
     }
@@ -149,10 +62,12 @@ pub async fn download_model(
     Ok(())
 }
 
-/// 运行抠图推理（使用 ONNX Runtime）
-pub fn run_inference(model_dir: &Path, image_bytes: &[u8], threshold: f64, model_id: &str) -> Result<Vec<u8>, AppError> {
-    let m = get_model(model_id);
-    let model_path = model_path(model_dir, m.filename);
+/// 运行抠图推理（模型定义来自注册表）
+pub fn run_inference(model_dir: &Path, image_bytes: &[u8], threshold: f64, model: &crate::services::model_registry::ModelDef) -> Result<Vec<u8>, AppError> {
+    let crate::services::model_registry::ModelParams::RemoveBg { .. } = &model.params else {
+        return Err(AppError::Image("该模型不是抠图模型".into()));
+    };
+    let model_path = model_path(model_dir, &model.filename);
     if !model_path.exists() {
         return Err(AppError::NotFound("抠图模型未下载，请先下载模型".into()));
     }
@@ -169,10 +84,11 @@ pub fn run_inference(model_dir: &Path, image_bytes: &[u8], threshold: f64, model
     );
 
     // 按模型官方预处理策略归一化
-    let input_data = preprocess(&resized, m.norm);
+    let crate::services::model_registry::ModelParams::RemoveBg { norm, .. } = &model.params else { unreachable!() };
+    let input_data = preprocess(&resized, *norm);
 
     // ONNX Runtime 推理（传入模型配置：输入名、是否需手动 sigmoid）
-    let mask = run_ort_inference(&model_path, &input_data, 1024, 1024, m)?;
+    let mask = run_ort_inference(&model_path, &input_data, 1024, 1024, model)?;
 
     // mask 缩放回原始尺寸（用 Bilinear，避免 Lanczos 在 mask 上产生振铃半透明边）
     let mask_img = image::GrayImage::from_raw(1024, 1024, mask)
@@ -219,7 +135,7 @@ fn preprocess(resized: &image::RgbImage, norm: Norm) -> Vec<f32> {
                 let v = resized.get_pixel(x, y)[c as usize] as f32 / 255.0;
                 let n = match norm {
                     Norm::ImageNet => (v - mean[c as usize]) / std[c as usize],
-                    Norm::UnitOnly => v,
+                    Norm::Unit => v,
                     Norm::Centered => v - 0.5,
                 };
                 out.push(n);
@@ -234,8 +150,11 @@ fn run_ort_inference(
     input_data: &[f32],
     w: u32,
     h: u32,
-    m: &BgModel,
+    m: &crate::services::model_registry::ModelDef,
 ) -> Result<Vec<u8>, AppError> {
+    let crate::services::model_registry::ModelParams::RemoveBg { norm, sigmoid_output, input_name } = &m.params else {
+        return Err(AppError::Image("该模型不是抠图模型".into()));
+    };
     use ort::session::Session;
 
     let mut session = Session::builder()
@@ -249,13 +168,14 @@ fn run_ort_inference(
         .map_err(|e| AppError::Image(format!("创建 Tensor 失败: {e}")))?;
 
     // 优先用模型配置的输入名，找不到回退到首个输入
-    let input_name = if session.inputs().iter().any(|i| i.name() == m.input_name) {
-        m.input_name.to_string()
+    let configured = input_name.clone();
+    let input_name = if session.inputs().iter().any(|i| i.name() == configured) {
+        configured
     } else {
         session.inputs()[0].name().to_string()
     };
     log::info!("[RMBG] 模型={} 输入名={} 归一化={:?} 手动sigmoid={}",
-        m.id, input_name, m.norm, !m.sigmoid_output);
+        m.id, input_name, norm, !sigmoid_output);
 
     let outputs = session
         .run(ort::inputs![input_name.as_str() => input_tensor])
@@ -269,7 +189,7 @@ fn run_ort_inference(
         .map_err(|e| AppError::Image(format!("输出解析失败: {e}")))?;
 
     // 后处理：CrispCut 输出是 logits，需手动 sigmoid；RMBG/ISNet 输出已 sigmoid
-    let probs: Vec<f32> = if m.sigmoid_output {
+    let probs: Vec<f32> = if *sigmoid_output {
         data.to_vec()
     } else {
         data.iter().map(|&v| 1.0 / (1.0 + (-v).exp())).collect()

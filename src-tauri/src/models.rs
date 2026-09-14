@@ -295,6 +295,8 @@ pub struct BgModelEntry {
     pub path: Option<String>,
     /// 是否为当前选中模型
     pub current: bool,
+    /// false = 用户导入的自定义模型（删除时连同记录移除）
+    pub builtin: bool,
 }
 
 /// 去水印模型清单条目
@@ -309,6 +311,8 @@ pub struct InpaintModelEntry {
     pub path: Option<String>,
     /// 是否为默认选用模型
     pub current: bool,
+    /// false = 用户导入的自定义模型（删除时连同记录移除）
+    pub builtin: bool,
 }
 
 /// 智能擦除请求（rect 为 0..1 相对坐标；mask 优先于 rect，白=擦除）

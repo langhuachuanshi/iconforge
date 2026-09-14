@@ -68,86 +68,33 @@ fn with_cached_session<T>(
     f(&mut guard.as_mut().expect("cache just filled").2)
 }
 
-/// 模型 IO 约定
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Io {
-    /// float 图 [0,1] + float mask（1=擦除），输出 float 需范围自适应（LaMa）
-    Float01,
-    /// uint8 图 + uint8 mask（255=擦除），输出 uint8，预处理内置图内（MI-GAN pipeline）
-    Uint8,
-}
-
-/// 可用修复模型定义
-pub struct InpaintModel {
-    pub id: &'static str,
-    pub name: &'static str,
-    pub url: &'static str,
-    pub filename: &'static str,
-    pub size: &'static str,
-    pub io: Io,
-}
-
-pub const INPAINT_MODELS: &[InpaintModel] = &[
-    InpaintModel {
-        id: "lama",
-        name: "LaMa（质量优先）",
-        url: "https://hf-mirror.com/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx",
-        filename: "lama_fp32.onnx",
-        size: "约 208MB · CPU 约 5s",
-        io: Io::Float01,
-    },
-    InpaintModel {
-        id: "migan",
-        name: "MI-GAN（速度优先）",
-        url: "https://hf-mirror.com/andraniksargsyan/migan/resolve/main/migan_pipeline_v2.onnx",
-        filename: "migan_v2.onnx",
-        size: "约 27MB · CPU 约 1.6s",
-        io: Io::Uint8,
-    },
-];
-
-pub fn get_inpaint_model(id: &str) -> &'static InpaintModel {
-    INPAINT_MODELS
-        .iter()
-        .find(|m| m.id == id)
-        .unwrap_or(&INPAINT_MODELS[0])
-}
+/// 模型注册表已迁至 model_registry.rs（内置种子 + 自定义导入统一管理）；
+/// 本文件只负责擦除推理流水线。Io 约定从 model_registry 复用。
+pub use crate::services::model_registry::Io;
 
 /// 模型文件路径（与抠图模型共用 models/ 子目录）
 pub fn model_path(base_dir: &Path, filename: &str) -> PathBuf {
     base_dir.join("models").join(filename)
 }
 
-pub fn is_downloaded(base_dir: &Path, model_id: &str) -> bool {
-    model_path(base_dir, get_inpaint_model(model_id).filename).exists()
-}
-
-pub fn delete_model(base_dir: &Path, model_id: &str) -> Result<(), AppError> {
-    let target = model_path(base_dir, get_inpaint_model(model_id).filename);
-    if target.exists() {
-        std::fs::remove_file(&target)?;
-    }
-    Ok(())
-}
-
-/// 下载模型（含进度事件，与抠图模型同模式）
+/// 下载模型（含进度事件，与抠图模型同模式）；url 来自注册表条目
 pub async fn download_model(
     window: &tauri::Window,
     model_dir: &Path,
-    model_id: &str,
+    filename: &str,
+    url: &str,
 ) -> Result<(), AppError> {
-    let m = get_inpaint_model(model_id);
-    let target = model_path(model_dir, m.filename);
+    let target = model_path(model_dir, filename);
     if target.exists() {
         return Ok(());
     }
     if let Some(parent) = target.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let tmp_path = model_dir.join(format!("{}.tmp", m.filename));
+    let tmp_path = model_dir.join(format!("{filename}.tmp"));
 
     let client = Client::builder().timeout(Duration::from_secs(1800)).build()?;
-    let resp = client.get(m.url).header("User-Agent", "IconForge/1.0").send().await?;
+    let resp = client.get(url).header("User-Agent", "IconForge/1.0").send().await?;
     if !resp.status().is_success() {
         return Err(AppError::Http(format!(
             "模型下载失败 (HTTP {})",
@@ -191,11 +138,11 @@ pub fn run_inpaint(
     image_bytes: &[u8],
     mask_bytes: Option<&[u8]>,
     rect: (f64, f64, f64, f64),
-    model_id: &str,
+    model: &crate::services::model_registry::ModelDef,
 ) -> Result<Vec<u8>, AppError> {
     const MODEL_SIZE: usize = 512;
 
-    let model_path = model_path(model_dir, get_inpaint_model(model_id).filename);
+    let model_path = model_path(model_dir, &model.filename);
     if !model_path.exists() {
         return Err(AppError::Image("擦除模型未下载".into()));
     }
@@ -280,11 +227,14 @@ pub fn run_inpaint(
         image::imageops::FilterType::Nearest,
     );
 
-    let m = get_inpaint_model(model_id);
+    let m = model;
+    let crate::services::model_registry::ModelParams::Inpaint { io } = &m.params else {
+        return Err(AppError::Image("该模型不是擦除模型".into()));
+    };
 
     log::info!(
         "[Inpaint] 模型={} 选区 {}x{}，上下文裁剪 {}x{} → 模型 {}x{}",
-        m.id,
+        m.name,
         x1 - x0,
         y1 - y0,
         cw,
@@ -318,7 +268,7 @@ pub fn run_inpaint(
             });
 
         // 按约定构造张量并推理（两路张量元素类型不同，无法提前统一，故分支内各自 run）
-        let outputs = match m.io {
+        let outputs = match io {
             Io::Float01 => {
                 let mut img_data = vec![0f32; 3 * MODEL_SIZE * MODEL_SIZE];
                 let mut mask_data = vec![0f32; MODEL_SIZE * MODEL_SIZE];
@@ -366,7 +316,7 @@ pub fn run_inpaint(
             .iter()
             .next()
             .ok_or_else(|| AppError::Image("模型无输出".into()))?;
-        match m.io {
+        match io {
             Io::Uint8 => {
                 let (_oshape, view) = value
                     .try_extract_tensor::<u8>()
@@ -445,25 +395,50 @@ pub fn run_inpaint(
 mod tests {
     use super::*;
 
+    fn lama_def() -> crate::services::model_registry::ModelDef {
+        crate::services::model_registry::ModelDef {
+            id: "lama".into(),
+            name: "LaMa".into(),
+            filename: "lama_fp32.onnx".into(),
+            size_label: String::new(),
+            url: None,
+            builtin: true,
+            params: crate::services::model_registry::ModelParams::Inpaint {
+                io: crate::services::model_registry::Io::Float01,
+            },
+        }
+    }
+
     /// 端到端验证：需模型已下载 + 本地水印样图，手动运行 `cargo test -- --ignored`
     #[test]
     #[ignore = "需要已下载模型与本地样图"]
     fn inpaint_watermark_sample() {
         let model_dir = Path::new(r"C:\Users\silas\AppData\Roaming\com.iconforge.app");
         let img = std::fs::read(r"C:\Users\silas\Pictures\image_498889043065379.png").unwrap();
-        let out = run_inpaint(model_dir, &img, None, (0.60, 0.82, 0.40, 0.18), "lama").unwrap();
+        let out = run_inpaint(model_dir, &img, None, (0.60, 0.82, 0.40, 0.18), &lama_def()).unwrap();
         std::fs::write(r"C:\Users\silas\AppData\Local\Temp\inpaint-out.png", &out).unwrap();
     }
 
-    /// MI-GAN 双模型验证：与 LaMa 同输入，输出应同为有效 PNG 且遮罩区被重建
+    /// 自定义模型导入路径验证（uint8 IO 约定，MI-GAN 文件）
     #[test]
     #[ignore = "需要已下载模型与本地样图"]
     fn inpaint_migan_sample() {
         let model_dir = Path::new(r"C:\Users\silas\AppData\Roaming\com.iconforge.app");
         let img = std::fs::read(r"C:\Users\silas\Pictures\image_498889043065379.png").unwrap();
+        let migan = crate::services::model_registry::ModelDef {
+            id: "migan-custom".into(),
+            name: "MI-GAN 自定义".into(),
+            filename: "migan_v2.onnx".into(),
+            size_label: String::new(),
+            url: None,
+            builtin: false,
+            params: crate::services::model_registry::ModelParams::Inpaint {
+                io: crate::services::model_registry::Io::Uint8,
+            },
+        };
         let t0 = std::time::Instant::now();
-        let out = run_inpaint(model_dir, &img, None, (0.60, 0.82, 0.40, 0.18), "migan").unwrap();
-        eprintln!("MI-GAN 全流程: {}ms", t0.elapsed().as_millis());
+        let out = run_inpaint(model_dir, &img, None, (0.60, 0.82, 0.40, 0.18), &migan).unwrap();
+        eprintln!("MI-GAN（自定义导入路径）全流程: {}ms", t0.elapsed().as_millis());
         std::fs::write(r"C:\Users\silas\AppData\Local\Temp\inpaint-migan-out.png", &out).unwrap();
     }
 
@@ -484,11 +459,11 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
         let t0 = std::time::Instant::now();
-        let out = run_inpaint(model_dir, &img, Some(&png), (0.0, 0.0, 0.0, 0.0), "lama").unwrap();
+        let out = run_inpaint(model_dir, &img, Some(&png), (0.0, 0.0, 0.0, 0.0), &lama_def()).unwrap();
         std::fs::write(r"C:\Users\silas\AppData\Local\Temp\inpaint-mask-out.png", &out).unwrap();
         eprintln!("第一次（含模型加载）: {}ms", t0.elapsed().as_millis());
         let t1 = std::time::Instant::now();
-        let _ = run_inpaint(model_dir, &img, Some(&png), (0.0, 0.0, 0.0, 0.0), "lama").unwrap();
+        let _ = run_inpaint(model_dir, &img, Some(&png), (0.0, 0.0, 0.0, 0.0), &lama_def()).unwrap();
         eprintln!("第二次（会话缓存）: {}ms", t1.elapsed().as_millis());
     }
 }

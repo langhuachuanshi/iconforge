@@ -39,10 +39,11 @@ pub async fn import_bg_model(
     model_id: Option<String>,
 ) -> Result<(), AppError> {
     let mid = model_id.unwrap_or_else(|| "rmbg-1.4".into());
-    let m = services::remove_bg::get_model(&mid);
     let target = {
         let storage = state.storage.lock();
-        services::remove_bg::model_path(storage.base_dir(), m.filename)
+        let m = services::model_registry::get_model(&storage, services::model_registry::CATEGORY_REMOVE_BG, &mid)
+            .ok_or_else(|| AppError::NotFound(format!("模型 {mid} 不存在")))?;
+        services::remove_bg::model_path(storage.base_dir(), &m.filename)
     };
     std::fs::copy(&source_path, &target)?;
     Ok(())
@@ -58,7 +59,9 @@ fn get_model_id(storage: &crate::services::storage::Storage) -> String {
 pub async fn check_bg_model(state: State<'_, AppState>) -> Result<serde_json::Value, AppError> {
     let storage = state.storage.lock();
     let mid = get_model_id(&storage);
-    let has = services::remove_bg::model_exists(storage.base_dir(), &mid);
+    let has = services::model_registry::get_model(&storage, services::model_registry::CATEGORY_REMOVE_BG, &mid)
+        .map(|m| services::model_registry::is_downloaded(&storage, &m))
+        .unwrap_or(false);
     Ok(serde_json::json!({"downloaded": has, "model": mid}))
 }
 
@@ -68,19 +71,19 @@ pub async fn list_bg_models(state: State<'_, AppState>) -> Result<Vec<BgModelEnt
     let storage = state.storage.lock();
     let base_dir = storage.base_dir().to_path_buf();
     let current = get_model_id(&storage);
-    drop(storage);
 
-    let mut list = Vec::with_capacity(services::remove_bg::BG_MODELS.len());
-    for m in services::remove_bg::BG_MODELS {
-        let p = services::remove_bg::model_path(&base_dir, m.filename);
+    let mut list = Vec::new();
+    for m in services::model_registry::list_models(&storage, services::model_registry::CATEGORY_REMOVE_BG) {
+        let p = services::remove_bg::model_path(&base_dir, &m.filename);
         let downloaded = p.exists();
         list.push(BgModelEntry {
-            id: m.id.to_string(),
-            name: m.name.to_string(),
-            size: m.size.to_string(),
+            id: m.id.clone(),
+            name: m.name.clone(),
+            size: m.size_label.clone(),
             downloaded,
             path: if downloaded { Some(p.to_string_lossy().to_string()) } else { None },
             current: m.id == current,
+            builtin: m.builtin,
         });
     }
     Ok(list)
@@ -93,16 +96,7 @@ pub async fn delete_bg_model(
     model_id: String,
 ) -> Result<(), AppError> {
     let storage = state.storage.lock();
-    let base_dir = storage.base_dir().to_path_buf();
-    drop(storage);
-
-    let m = services::remove_bg::get_model(&model_id);
-    let p = services::remove_bg::model_path(&base_dir, m.filename);
-    if !p.exists() {
-        return Err(AppError::NotFound(format!("模型 {} 未下载", model_id)));
-    }
-    std::fs::remove_file(&p)?;
-    Ok(())
+    services::model_registry::delete_model(&storage, services::model_registry::CATEGORY_REMOVE_BG, &model_id)
 }
 
 /// 在系统资源管理器中打开模型所在位置（Windows 选中文件，其他平台打开目录）
@@ -113,10 +107,9 @@ pub async fn open_model_location(
 ) -> Result<(), AppError> {
     let storage = state.storage.lock();
     let base_dir = storage.base_dir().to_path_buf();
-    drop(storage);
-
-    let m = services::remove_bg::get_model(&model_id);
-    let p = services::remove_bg::model_path(&base_dir, m.filename);
+    let m = services::model_registry::get_model(&storage, services::model_registry::CATEGORY_REMOVE_BG, &model_id)
+        .ok_or_else(|| AppError::NotFound(format!("模型 {model_id} 不存在")))?;
+    let p = services::remove_bg::model_path(&base_dir, &m.filename);
     if !p.exists() {
         return Err(AppError::NotFound(format!("模型 {} 未下载", model_id)));
     }
@@ -149,11 +142,14 @@ pub async fn download_bg_model(
     window: tauri::Window,
     state: State<'_, AppState>,
 ) -> Result<(), AppError> {
-    let (model_dir, mid) = {
+    let (model_dir, filename, url) = {
         let storage = state.storage.lock();
-        (storage.base_dir().to_path_buf(), get_model_id(&storage))
+        let m = services::model_registry::get_model(&storage, services::model_registry::CATEGORY_REMOVE_BG, &get_model_id(&storage))
+            .ok_or_else(|| AppError::NotFound("抠图模型不存在".into()))?;
+        let url = m.url.clone().ok_or_else(|| AppError::ProviderError("自定义模型无下载链接".into()))?;
+        (storage.base_dir().to_path_buf(), m.filename.clone(), url)
     };
-    services::remove_bg::download_model(&window, &model_dir, &mid).await
+    services::remove_bg::download_model(&window, &model_dir, &filename, &url).await
 }
 
 /// 移除背景
@@ -163,14 +159,16 @@ pub async fn remove_background(
     req: RemoveBgRequest,
 ) -> Result<ImageResponse, AppError> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(&req.image)?;
-    let (model_dir, mid) = {
+    let (model_dir, model) = {
         let storage = state.storage.lock();
-        (storage.base_dir().to_path_buf(), get_model_id(&storage))
+        let m = services::model_registry::get_model(&storage, services::model_registry::CATEGORY_REMOVE_BG, &get_model_id(&storage))
+            .ok_or_else(|| AppError::NotFound("抠图模型不存在".into()))?;
+        (storage.base_dir().to_path_buf(), m)
     };
     let threshold = req.threshold.clamp(0.0, 1.0);
 
     let result = tokio::task::spawn_blocking(move || {
-        services::remove_bg::run_inference(&model_dir, &bytes, threshold, &mid)
+        services::remove_bg::run_inference(&model_dir, &bytes, threshold, &model)
     })
     .await
     .map_err(|e| AppError::Image(e.to_string()))??;
@@ -236,27 +234,44 @@ pub async fn test_aliyun_matting(state: State<'_, AppState>) -> Result<u64, AppE
     Ok(start.elapsed().as_millis() as u64)
 }
 
+/// 添加自定义模型（.onnx 导入注册表；category: remove_bg / inpaint）
+#[tauri::command]
+pub fn add_custom_model(
+    state: State<'_, AppState>,
+    category: String,
+    name: String,
+    params: services::model_registry::ModelParams,
+    path: String,
+) -> Result<serde_json::Value, AppError> {
+    let storage = state.storage.lock();
+    let def = services::model_registry::add_custom_model(
+        &storage,
+        &category,
+        name.trim(),
+        &params,
+        std::path::Path::new(&path),
+    )?;
+    Ok(serde_json::json!({ "id": def.id, "name": def.name }))
+}
+
 /// 去水印模型清单（含下载状态与当前选用，读 config inpaint_model）
 #[tauri::command]
 pub fn list_inpaint_models(state: State<'_, AppState>) -> Vec<InpaintModelEntry> {
-    let (dir, current) = {
-        let storage = state.storage.lock();
-        (
-            storage.base_dir().to_path_buf(),
-            storage.get_config("inpaint_model", "lama"),
-        )
-    };
-    services::inpaint::INPAINT_MODELS
-        .iter()
+    let storage = state.storage.lock();
+    let dir = storage.base_dir().to_path_buf();
+    let current = storage.get_config("inpaint_model", "lama");
+    services::model_registry::list_models(&storage, services::model_registry::CATEGORY_INPAINT)
+        .into_iter()
         .map(|m| {
-            let p = services::inpaint::model_path(&dir, m.filename);
+            let p = services::inpaint::model_path(&dir, &m.filename);
             InpaintModelEntry {
-                id: m.id.into(),
-                name: m.name.into(),
-                size: m.size.into(),
+                id: m.id.clone(),
+                name: m.name.clone(),
+                size: m.size_label.clone(),
                 downloaded: p.exists(),
                 path: p.exists().then(|| p.display().to_string()),
                 current: m.id == current,
+                builtin: m.builtin,
             }
         })
         .collect()
@@ -265,10 +280,10 @@ pub fn list_inpaint_models(state: State<'_, AppState>) -> Vec<InpaintModelEntry>
 /// 设置默认擦除模型
 #[tauri::command]
 pub fn set_inpaint_model(state: State<'_, AppState>, id: String) -> Result<(), AppError> {
-    if !services::inpaint::INPAINT_MODELS.iter().any(|m| m.id == id) {
+    let storage = state.storage.lock();
+    if services::model_registry::get_model(&storage, services::model_registry::CATEGORY_INPAINT, &id).is_none() {
         return Err(AppError::NotFound(format!("擦除模型 {id} 不存在")));
     }
-    let mut storage = state.storage.lock();
     storage.set_config("inpaint_model", &id)
 }
 
@@ -286,13 +301,14 @@ pub fn import_inpaint_model(state: State<'_, AppState>, id: String, path: String
     if !is_onnx {
         return Err(AppError::ProviderError("请选择 .onnx 模型文件".into()));
     }
-    let m = services::inpaint::get_inpaint_model(&id);
-    let dir = {
+    let (dir, filename) = {
         let storage = state.storage.lock();
-        storage.base_dir().to_path_buf()
+        let m = services::model_registry::get_model(&storage, services::model_registry::CATEGORY_INPAINT, &id)
+            .ok_or_else(|| AppError::NotFound(format!("擦除模型 {id} 不存在")))?;
+        (storage.base_dir().to_path_buf(), m.filename.clone())
     };
     std::fs::create_dir_all(dir.join("models"))?;
-    let dst = services::inpaint::model_path(&dir, m.filename);
+    let dst = services::inpaint::model_path(&dir, &filename);
     std::fs::copy(&src, &dst)?;
     Ok(())
 }
@@ -300,12 +316,13 @@ pub fn import_inpaint_model(state: State<'_, AppState>, id: String, path: String
 /// 在资源管理器中打开擦除模型所在位置
 #[tauri::command]
 pub fn open_inpaint_location(state: State<'_, AppState>, id: String) -> Result<(), AppError> {
-    let m = services::inpaint::get_inpaint_model(&id);
-    let dir = {
+    let (dir, filename) = {
         let storage = state.storage.lock();
-        storage.base_dir().to_path_buf()
+        let m = services::model_registry::get_model(&storage, services::model_registry::CATEGORY_INPAINT, &id)
+            .ok_or_else(|| AppError::NotFound(format!("擦除模型 {id} 不存在")))?;
+        (storage.base_dir().to_path_buf(), m.filename.clone())
     };
-    let p = services::inpaint::model_path(&dir, m.filename);
+    let p = services::inpaint::model_path(&dir, &filename);
     if !p.exists() {
         return Err(AppError::NotFound("擦除模型未下载".into()));
     }
@@ -331,21 +348,21 @@ pub async fn download_inpaint_model(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), AppError> {
-    let dir = {
+    let (dir, filename, url) = {
         let storage = state.storage.lock();
-        storage.base_dir().to_path_buf()
+        let m = services::model_registry::get_model(&storage, services::model_registry::CATEGORY_INPAINT, &id)
+            .ok_or_else(|| AppError::NotFound(format!("擦除模型 {id} 不存在")))?;
+        let url = m.url.clone().ok_or_else(|| AppError::ProviderError("自定义模型无下载链接".into()))?;
+        (storage.base_dir().to_path_buf(), m.filename.clone(), url)
     };
-    services::inpaint::download_model(&window, &dir, &id).await
+    services::inpaint::download_model(&window, &dir, &filename, &url).await
 }
 
 /// 删除去水印模型
 #[tauri::command]
 pub fn delete_inpaint_model(state: State<'_, AppState>, id: String) -> Result<(), AppError> {
-    let dir = {
-        let storage = state.storage.lock();
-        storage.base_dir().to_path_buf()
-    };
-    services::inpaint::delete_model(&dir, &id)
+    let storage = state.storage.lock();
+    services::model_registry::delete_model(&storage, services::model_registry::CATEGORY_INPAINT, &id)
 }
 
 /// 智能擦除（LaMa 本地修复）：mask（白=擦除）优先于 rect 选区，遮罩外保留原像素
@@ -359,13 +376,15 @@ pub async fn inpaint_region(
         Some(m) => Some(base64::engine::general_purpose::STANDARD.decode(m)?),
         None => None,
     };
-    let dir = {
+    let (dir, model) = {
         let storage = state.storage.lock();
-        storage.base_dir().to_path_buf()
+        let mid = if req.model_id.is_empty() { "lama".to_string() } else { req.model_id.clone() };
+        let model = services::model_registry::get_model(&storage, services::model_registry::CATEGORY_INPAINT, &mid)
+            .ok_or_else(|| AppError::NotFound(format!("擦除模型 {mid} 不存在")))?;
+        (storage.base_dir().to_path_buf(), model)
     };
 
     let result = tokio::task::spawn_blocking(move || {
-        let model = if req.model_id.is_empty() { "lama".to_string() } else { req.model_id };
         services::inpaint::run_inpaint(
             &dir,
             &bytes,

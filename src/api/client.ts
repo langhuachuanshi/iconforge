@@ -131,10 +131,22 @@ export interface InpaintModelEntry {
   downloaded: boolean
   path?: string | null
   current: boolean
+  builtin: boolean
 }
 
 export function listInpaintModels(): Promise<InpaintModelEntry[]> {
   return invoke('list_inpaint_models')
+}
+
+/** 模型参数（按类别）：擦除 = IO 约定；抠图 = 归一化 + sigmoid + 输入名。
+ *  字段名与 Rust 端 serde(tag="kind") 枚举一致（snake_case）。 */
+export type CustomModelParams =
+  | { kind: 'Inpaint'; io: 'Float01' | 'Uint8' }
+  | { kind: 'RemoveBg'; norm: 'ImageNet' | 'Unit' | 'Centered'; sigmoid_output: boolean; input_name: string }
+
+/** 添加自定义模型（.onnx 导入注册表，随插随用） */
+export function addCustomModel(category: 'remove_bg' | 'inpaint', name: string, params: CustomModelParams, path: string): Promise<void> {
+  return invoke('add_custom_model', { category, name, params, path })
 }
 
 export function setInpaintModel(id: string): Promise<void> {
@@ -449,6 +461,8 @@ export interface BgModelEntry {
   path: string | null
   /** 是否为当前选中模型 */
   current: boolean
+  /** false = 用户导入的自定义模型（删除时连同记录移除） */
+  builtin: boolean
 }
 
 export async function checkBgModel(): Promise<{ downloaded: boolean; model: string }> {

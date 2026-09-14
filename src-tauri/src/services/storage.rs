@@ -51,6 +51,15 @@ CREATE TABLE IF NOT EXISTS icon_versions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_versions_icon ON icon_versions(icon_id, version_no);
+
+CREATE TABLE IF NOT EXISTS custom_models (
+    id          TEXT PRIMARY KEY,
+    category    TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    filename    TEXT NOT NULL,
+    params      TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
 ";
 
 const MIGRATE_SQL: &str = "
@@ -390,6 +399,37 @@ impl Storage {
             |row| row.get(0),
         )
         .unwrap_or_else(|_| default.to_string())
+    }
+
+    /// 新增自定义模型记录
+    pub fn insert_custom_model(&self, id: &str, category: &str, name: &str, filename: &str, params: &str) -> Result<(), AppError> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO custom_models (id, category, name, filename, params, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![id, category, name, filename, params, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// 按类别列出自定义模型记录 (id, name, filename, params)
+    pub fn list_custom_models(&self, category: &str) -> Result<Vec<(String, String, String, String)>, AppError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, filename, params FROM custom_models WHERE category = ?1 ORDER BY created_at",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![category], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// 删除自定义模型记录（文件由调用方删）
+    pub fn delete_custom_model(&self, id: &str) -> Result<(), AppError> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM custom_models WHERE id = ?1", rusqlite::params![id])?;
+        Ok(())
     }
 
     /// 设置配置值（upsert）

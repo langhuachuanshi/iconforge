@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import type { FormInstance, FormRules } from 'element-plus'
@@ -24,6 +24,8 @@ import {
   setConfig,
   testProvider,
   testAliyunMatting,
+  addCustomModel,
+  type CustomModelParams,
   type ProviderEntry,
   type ProviderUpsertRequest,
   type BgModelEntry,
@@ -357,9 +359,13 @@ async function handleDeleteInpaint(id: string) {
   const m = inpaintModels.value.find(x => x.id === id)
   if (!m?.downloaded) return
   try {
-    await ElMessageBox.confirm(`删除「${m.name}」（可随时重新下载/导入）？`, '删除模型', {
-      confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning'
-    })
+    await ElMessageBox.confirm(
+      m.builtin
+        ? `删除「${m.name}」已下载的文件？（条目保留，可重新下载/导入）`
+        : `删除自定义模型「${m.name}」？文件与记录一并移除`,
+      '删除模型',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+    )
   } catch { return }
   try {
     await deleteInpaintModel(id)
@@ -375,6 +381,67 @@ async function handleOpenInpaintLocation(id: string) {
     await openInpaintLocation(id)
   } catch (e: any) {
     ElMessage.error('打开失败：' + (e?.message || e))
+  }
+}
+
+// ── 添加自定义模型（两类通用：抠图 / 智能擦除，随插随用）──
+const customDlgVisible = ref(false)
+const customDlgCategory = ref<'remove_bg' | 'inpaint'>('inpaint')
+const customName = ref('')
+const customTemplate = ref('')   // 参数模板 key
+const customPath = ref('')
+const customAdding = ref(false)
+
+const INPAINT_TEMPLATES = [
+  { key: 'float01', label: 'LaMa 型（float 双输入 @512）', params: { kind: 'Inpaint', io: 'Float01' } as CustomModelParams },
+  { key: 'uint8', label: 'MI-GAN 型（uint8 双输入，预处理内置）', params: { kind: 'Inpaint', io: 'Uint8' } as CustomModelParams },
+]
+const BG_TEMPLATES = [
+  { key: 'imagenet', label: 'RMBG 系（ImageNet 归一化，输出已 sigmoid）', params: { kind: 'RemoveBg', norm: 'ImageNet', sigmoid_output: true, input_name: 'input' } as CustomModelParams },
+  { key: 'unit', label: 'CrispCut 系（0-1 归一化，输出需 sigmoid）', params: { kind: 'RemoveBg', norm: 'Unit', sigmoid_output: false, input_name: 'input' } as CustomModelParams },
+  { key: 'centered', label: 'ISNet 系（±0.5 归一化，输出已 sigmoid）', params: { kind: 'RemoveBg', norm: 'Centered', sigmoid_output: true, input_name: 'input' } as CustomModelParams },
+]
+
+const customTemplates = computed(() => (customDlgCategory.value === 'inpaint' ? INPAINT_TEMPLATES : BG_TEMPLATES))
+
+function openCustomDlg(category: 'remove_bg' | 'inpaint') {
+  customDlgCategory.value = category
+  customName.value = ''
+  customTemplate.value = customTemplates.value[0].key
+  customPath.value = ''
+  customDlgVisible.value = true
+}
+
+async function pickCustomModelFile() {
+  const { open } = await import('@tauri-apps/plugin-dialog')
+  const picked = await open({
+    title: '选择 ONNX 模型文件',
+    filters: [{ name: 'ONNX 模型', extensions: ['onnx'] }],
+  })
+  const p = Array.isArray(picked) ? picked[0] : picked
+  if (p) {
+    customPath.value = p
+    if (!customName.value.trim()) {
+      customName.value = p.split(/[\\/]/).pop()?.replace(/\.onnx$/i, '') || ''
+    }
+  }
+}
+
+async function handleAddCustomModel() {
+  if (!customName.value.trim()) { ElMessage.warning('请填写模型名称'); return }
+  if (!customPath.value) { ElMessage.warning('请选择 .onnx 模型文件'); return }
+  const tpl = customTemplates.value.find(t => t.key === customTemplate.value)
+  if (!tpl) return
+  customAdding.value = true
+  try {
+    await addCustomModel(customDlgCategory.value, customName.value.trim(), tpl.params, customPath.value)
+    customDlgVisible.value = false
+    await Promise.all([loadBgSettings()])
+    ElMessage.success('自定义模型已添加，可在列表中选用')
+  } catch (e: any) {
+    ElMessage.error('添加失败：' + (e?.message || e))
+  } finally {
+    customAdding.value = false
   }
 }
 
@@ -461,7 +528,9 @@ async function deleteModel(id: string) {
   if (!m) return
   try {
     await ElMessageBox.confirm(
-      `确定删除已下载的「${m.name}」模型文件吗？此操作不可恢复。`,
+      m.builtin
+        ? `删除已下载的「${m.name}」模型文件？（条目保留，可重新下载/导入）`
+        : `删除自定义模型「${m.name}」？文件与记录一并移除`,
       '删除确认',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
     )
@@ -565,6 +634,7 @@ async function openLocation(id: string) {
             <div class="row-main">
               <div class="row-top">
                 <span class="row-name">{{ m.name }}</span>
+                <el-tag v-if="!m.builtin" type="danger" size="small" effect="plain">自定义</el-tag>
                 <el-tag v-if="m.current" type="success" size="small">使用中</el-tag>
                 <el-tag v-else-if="m.downloaded" type="info" size="small">已下载</el-tag>
                 <el-tag v-else type="warning" size="small" effect="plain">未下载</el-tag>
@@ -577,13 +647,14 @@ async function openLocation(id: string) {
             <div class="row-actions">
               <!-- 未下载：主操作下载 -->
               <template v-if="!m.downloaded">
-                <el-button text size="small" type="primary" :loading="bgDownloading === m.id" @click="downloadModel(m.id)">下载</el-button>
-                <el-button text size="small" @click="importModel(m.id)" title="导入本地 ONNX">导入</el-button>
+                <el-button v-if="m.builtin" text size="small" type="primary" :loading="bgDownloading === m.id" @click="downloadModel(m.id)">下载</el-button>
+                <el-button v-if="m.builtin" text size="small" @click="importModel(m.id)" title="导入本地 ONNX">导入</el-button>
+                <el-button v-if="!m.builtin" text size="small" type="danger" @click="deleteModel(m.id)">删除</el-button>
               </template>
               <!-- 已下载但非当前：主操作选用 -->
               <template v-else-if="!m.current">
                 <el-button text size="small" type="primary" @click="selectModel(m.id)">选用</el-button>
-                <el-button text size="small" @click="importModel(m.id)" title="重新导入">导入</el-button>
+                <el-button v-if="m.builtin" text size="small" @click="importModel(m.id)" title="重新导入">导入</el-button>
                 <el-button text size="small" @click="openLocation(m.id)" title="打开文件位置">位置</el-button>
                 <el-button text size="small" type="danger" @click="deleteModel(m.id)">删除</el-button>
               </template>
@@ -595,6 +666,9 @@ async function openLocation(id: string) {
             </div>
           </div>
         </div>
+        <el-button size="small" style="margin-top: 10px" @click="openCustomDlg('remove_bg')">
+          <el-icon><Plus /></el-icon> 添加自定义模型
+        </el-button>
       </el-tab-pane>
 
       <el-tab-pane label="智能擦除" lazy>
@@ -604,6 +678,7 @@ async function openLocation(id: string) {
             <div class="row-main">
               <div class="row-top">
                 <span class="row-name">{{ m.name }}</span>
+                <el-tag v-if="!m.builtin" type="danger" size="small" effect="plain">自定义</el-tag>
                 <el-tag v-if="m.current && m.downloaded" type="success" size="small">使用中</el-tag>
                 <el-tag v-else-if="m.downloaded" type="info" size="small">已下载</el-tag>
                 <el-tag v-else type="warning" size="small" effect="plain">未下载</el-tag>
@@ -615,12 +690,13 @@ async function openLocation(id: string) {
             </div>
             <div class="row-actions">
               <template v-if="!m.downloaded">
-                <el-button text size="small" type="primary" :loading="inpaintDownloadingId === m.id" @click="handleDownloadInpaint(m.id)">下载</el-button>
-                <el-button text size="small" @click="handleImportInpaint(m.id)" title="从本地 .onnx 文件导入">导入</el-button>
+                <el-button v-if="m.builtin" text size="small" type="primary" :loading="inpaintDownloadingId === m.id" @click="handleDownloadInpaint(m.id)">下载</el-button>
+                <el-button v-if="m.builtin" text size="small" @click="handleImportInpaint(m.id)" title="从本地 .onnx 文件导入">导入</el-button>
+                <el-button v-if="!m.builtin" text size="small" type="danger" @click="handleDeleteInpaint(m.id)">删除</el-button>
               </template>
               <template v-else-if="!m.current">
                 <el-button text size="small" type="primary" @click="handleSelectInpaint(m.id)">选用</el-button>
-                <el-button text size="small" @click="handleImportInpaint(m.id)" title="重新导入">导入</el-button>
+                <el-button v-if="m.builtin" text size="small" @click="handleImportInpaint(m.id)" title="重新导入">导入</el-button>
                 <el-button text size="small" @click="handleOpenInpaintLocation(m.id)" title="打开文件位置">位置</el-button>
                 <el-button text size="small" type="danger" @click="handleDeleteInpaint(m.id)">删除</el-button>
               </template>
@@ -631,7 +707,12 @@ async function openLocation(id: string) {
             </div>
           </div>
         </div>
-        <p class="tool-desc" style="margin-top: 10px">LaMa 质量优先（约 5s/次）；MI-GAN 速度优先（约 1.6s/次），日常去水印建议 MI-GAN</p>
+        <div style="margin-top: 10px; display: flex; align-items: center; gap: 12px">
+          <el-button size="small" @click="openCustomDlg('inpaint')">
+            <el-icon><Plus /></el-icon> 添加自定义模型
+          </el-button>
+          <span class="tool-desc">导入任意擦除 ONNX（LaMa 型 / MI-GAN 型 IO 约定），随插随用</span>
+        </div>
       </el-tab-pane>
 
       <el-tab-pane label="关于" lazy>
@@ -735,6 +816,28 @@ async function openLocation(id: string) {
       <template #footer>
         <el-button @click="aliyunDialogVisible = false">取消</el-button>
         <el-button type="primary" @click="saveAliyunKeys">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 添加自定义模型（抠图 / 智能擦除 通用） -->
+    <el-dialog v-model="customDlgVisible" :title="customDlgCategory === 'inpaint' ? '添加自定义擦除模型' : '添加自定义抠图模型'" width="480px" :close-on-click-modal="false">
+      <el-form label-position="top">
+        <el-form-item label="模型名称">
+          <el-input v-model="customName" placeholder="例如：我的修复模型" maxlength="40" />
+        </el-form-item>
+        <el-form-item label="参数模板（决定预处理约定，选错会输出异常）">
+          <el-select v-model="customTemplate" style="width:100%">
+            <el-option v-for="t in customTemplates" :key="t.key" :value="t.key" :label="t.label" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="模型文件（.onnx）">
+          <el-button @click="pickCustomModelFile">选择文件…</el-button>
+          <span v-if="customPath" class="tool-desc" style="margin-left: 8px; word-break: break-all">{{ customPath }}</span>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="customDlgVisible = false">取消</el-button>
+        <el-button type="primary" :loading="customAdding" @click="handleAddCustomModel">添加</el-button>
       </template>
     </el-dialog>
   </div>
