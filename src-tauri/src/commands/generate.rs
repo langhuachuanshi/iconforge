@@ -3,7 +3,7 @@ use tauri::State;
 
 use crate::data::templates;
 use crate::error::AppError;
-use crate::models::{GenerateRequest, GenerateResponse, ProviderInfo, Template};
+use crate::models::{GenerateRequest, GenerateResponse, ProviderInfo, Template, TestProviderResult};
 use crate::providers::OpenAiProvider;
 use crate::AppState;
 
@@ -121,5 +121,49 @@ pub async fn generate_icon(
         image: image_b64,
         format: result.format,
         icon_id: meta.id,
+    })
+}
+
+/// 测试服务商连接：以支持的最小尺寸发一次最小生成请求，返回耗时
+#[tauri::command]
+pub async fn test_provider(
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<TestProviderResult, AppError> {
+    let config = {
+        let storage = state.storage.lock();
+        let all = storage.list_providers()?;
+        all.into_iter()
+            .find(|p| p.id == provider_id || p.name == provider_id)
+            .ok_or_else(|| AppError::NotFound(format!("服务商 {} 不存在", provider_id)))?
+    };
+
+    // 取面积最小的支持尺寸，尽量降低测试成本
+    let size = parse_supported_sizes(&config.supported_sizes)
+        .into_iter()
+        .min_by_key(|s| {
+            let mut it = s.splitn(2, 'x');
+            let w: u64 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            let h: u64 = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            w.saturating_mul(h)
+        })
+        .unwrap_or_else(|| "1024x1024".into());
+
+    let start = std::time::Instant::now();
+    let result = OpenAiProvider::generate(
+        &config,
+        "a simple flat icon of a red circle on white background",
+        &size,
+        None,
+        None,
+    )
+    .await?;
+    let latency_ms = start.elapsed().as_millis() as u64;
+    drop(result);
+
+    Ok(TestProviderResult {
+        latency_ms,
+        model: config.model.clone(),
+        size,
     })
 }

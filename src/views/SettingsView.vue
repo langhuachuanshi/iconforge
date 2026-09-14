@@ -16,6 +16,7 @@ import {
   openModelLocation,
   getConfig,
   setConfig,
+  testProvider,
   type ProviderEntry,
   type ProviderUpsertRequest,
   type BgModelEntry,
@@ -215,6 +216,22 @@ async function handleToggle(row: ProviderEntry) {
   }
 }
 
+// 测试连接：发一次最小生成请求，成功报耗时，失败透出服务商原始错误
+const testingId = ref('')
+async function handleTest(row: ProviderEntry) {
+  if (testingId.value) return
+  testingId.value = row.id
+  try {
+    const r = await testProvider(row.id)
+    ElMessage.success(`${row.name} 连接正常 · ${r.model || '默认模型'} · ${r.size} · ${(r.latency_ms / 1000).toFixed(1)}s`)
+  } catch (e: any) {
+    const detail = typeof e === 'string' ? e : e?.message || JSON.stringify(e)
+    ElMessage.error({ message: `${row.name} 连接失败：${detail}`, duration: 8000, showClose: true })
+  } finally {
+    testingId.value = ''
+  }
+}
+
 async function openDoc(url: string) {
   try {
     await openUrl(url)
@@ -375,6 +392,13 @@ async function openLocation(id: string) {
             </div>
             <div class="row-actions">
               <el-switch :model-value="row.enabled" @change="handleToggle(row)" size="small" />
+              <el-button
+                text
+                size="small"
+                type="primary"
+                :loading="testingId === row.id"
+                @click="handleTest(row)"
+              >测试</el-button>
               <el-button text size="small" type="primary" @click="openEdit(row)">设置</el-button>
               <el-button text size="small" type="danger" @click="handleDelete(row)">删除</el-button>
             </div>
@@ -602,7 +626,6 @@ async function openLocation(id: string) {
 .row-top {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
 }
 

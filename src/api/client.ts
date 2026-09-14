@@ -105,6 +105,16 @@ export async function generateIcon(params: GenerateParams): Promise<GenerateResu
   return invoke('generate_icon', { req: params })
 }
 
+export interface TestProviderResult {
+  latency_ms: number
+  model: string
+  size: string
+}
+
+export function testProvider(providerId: string): Promise<TestProviderResult> {
+  return invoke('test_provider', { providerId })
+}
+
 export async function cropImage(params: CropParams): Promise<string> {
   const result = await invoke<{ image: string }>('crop_image', { req: params })
   return result.image

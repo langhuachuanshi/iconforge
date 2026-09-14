@@ -416,6 +416,13 @@ async function handleGenerate() {
   }
 
   let fail = 0;
+  const failureMsgs: string[] = [];
+  const errText = (e: unknown): string =>
+    typeof e === "string"
+      ? e
+      : e && typeof e === "object" && "message" in e
+        ? String((e as { message: unknown }).message)
+        : JSON.stringify(e);
   try {
     for (let i = 0; i < n; i++) {
       genTotal.value = n;
@@ -430,19 +437,38 @@ async function handleGenerate() {
           workspace.setImage(r.b64, r.iconId, currentConcept.value);
       } catch (e) {
         fail++;
+        failureMsgs.push(errText(e));
         console.error(`[生成] 第 ${i + 1} 张失败:`, e);
       }
     }
     if (results.value.length === 0) {
-      throw new Error("全部生成失败，请检查网络或服务商配置");
+      // 全部失败：透出服务商返回的真实原因（HTTP 状态码 + 响应体）
+      const seen = new Set(failureMsgs.map((m) => m.slice(0, 120)));
+      const detail =
+        [...seen][0] || "未知错误，请查看日志或使用设置页的「测试」排查";
+      throw new Error(
+        `全部生成失败（${fail} 张）：${detail}` +
+          (seen.size > 1 ? ` 等共 ${seen.size} 种错误` : ""),
+      );
     }
-    ElMessage.success(
-      `生成 ${results.value.length} 张${fail > 0 ? `（${fail} 张失败）` : ""}`,
-    );
+    if (fail > 0) {
+      ElMessage({
+        type: "warning",
+        message: `生成 ${results.value.length} 张，${fail} 张失败：${failureMsgs[0]}`,
+        duration: 8000,
+        showClose: true,
+      });
+    } else {
+      ElMessage.success(`生成 ${results.value.length} 张`);
+    }
   } catch (e: any) {
     console.error("[生成] 失败:", e);
-    const detail = typeof e === "string" ? e : e?.message || JSON.stringify(e);
-    ElMessage.error(`生成失败：${detail}`);
+    const detail = errText(e);
+    ElMessage.error({
+      message: `生成失败：${detail}`,
+      duration: 8000,
+      showClose: true,
+    });
   } finally {
     generating.value = false;
     genTotal.value = 0;

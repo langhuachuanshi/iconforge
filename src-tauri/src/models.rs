@@ -69,6 +69,15 @@ pub struct GenerateResponse {
     pub icon_id: String,
 }
 
+/// 服务商测试连接结果
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestProviderResult {
+    pub latency_ms: u64,
+    pub model: String,
+    pub size: String,
+}
+
 /// 裁剪请求
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
