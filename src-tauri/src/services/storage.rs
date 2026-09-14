@@ -569,7 +569,7 @@ mod tests {
     fn test_save_and_list_versions() {
         let (_dir, storage) = open_test_storage();
         // 先建一个 icon 记录（外键约束不强制，但语义上需要）
-        storage.save_icon(&fake_png(), "test", "", "tongyi").unwrap();
+        storage.save_icon(&fake_png(), "test", "", "tongyi", "").unwrap();
         let icon_id = storage.list_icons(10, 0).unwrap()[0].id.clone();
 
         // 存 3 个版本
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn test_latest_version_bytes() {
         let (_dir, storage) = open_test_storage();
-        storage.save_icon(&fake_png(), "test", "", "").unwrap();
+        storage.save_icon(&fake_png(), "test", "", "", "").unwrap();
         let icon_id = storage.list_icons(10, 0).unwrap()[0].id.clone();
 
         // 无版本时返回 None
@@ -602,7 +602,7 @@ mod tests {
     #[test]
     fn test_version_limit_eviction() {
         let (_dir, storage) = open_test_storage();
-        storage.save_icon(&fake_png(), "test", "", "").unwrap();
+        storage.save_icon(&fake_png(), "test", "", "", "").unwrap();
         let icon_id = storage.list_icons(10, 0).unwrap()[0].id.clone();
 
         // 存超过上限（10）个版本
@@ -622,7 +622,7 @@ mod tests {
     #[test]
     fn test_delete_version() {
         let (_dir, storage) = open_test_storage();
-        storage.save_icon(&fake_png(), "test", "", "").unwrap();
+        storage.save_icon(&fake_png(), "test", "", "", "").unwrap();
         let icon_id = storage.list_icons(10, 0).unwrap()[0].id.clone();
         let meta = storage.save_version(&icon_id, &fake_png(), "").unwrap();
 

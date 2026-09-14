@@ -2,7 +2,7 @@ use base64::Engine;
 use tauri::{Emitter, State, Window};
 
 use crate::error::AppError;
-use crate::models::{CropRequest, ImageResponse, RemoveBgRequest, RemoveColorRequest, EdgeRefineRequest, SmartCropRequest, ShapeMaskRequest, AdjustColorRequest, BgModelEntry};
+use crate::models::{CropRequest, ImageResponse, RemoveBgRequest, RemoveColorRequest, EdgeRefineRequest, SmartCropRequest, ShapeMaskRequest, AdjustColorRequest, BgModelEntry, InpaintModelEntry, InpaintRequest};
 use crate::services;
 use crate::AppState;
 
@@ -234,6 +234,72 @@ pub async fn test_aliyun_matting(state: State<'_, AppState>) -> Result<u64, AppE
     let logger = |_msg: &str| {};
     services::aliyun_imageseg::probe(&ak, &sk, &logger).await?;
     Ok(start.elapsed().as_millis() as u64)
+}
+
+/// 去水印模型清单（含下载状态）
+#[tauri::command]
+pub fn list_inpaint_models(state: State<'_, AppState>) -> Vec<InpaintModelEntry> {
+    let dir = {
+        let storage = state.storage.lock();
+        storage.base_dir().to_path_buf()
+    };
+    services::inpaint::INPAINT_MODELS
+        .iter()
+        .map(|m| InpaintModelEntry {
+            id: m.id.into(),
+            name: m.name.into(),
+            size: m.size.into(),
+            downloaded: services::inpaint::is_downloaded(&dir, m.id),
+        })
+        .collect()
+}
+
+/// 下载去水印模型（含进度事件）
+#[tauri::command]
+pub async fn download_inpaint_model(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), AppError> {
+    let dir = {
+        let storage = state.storage.lock();
+        storage.base_dir().to_path_buf()
+    };
+    services::inpaint::download_model(&window, &dir, &id).await
+}
+
+/// 删除去水印模型
+#[tauri::command]
+pub fn delete_inpaint_model(state: State<'_, AppState>, id: String) -> Result<(), AppError> {
+    let dir = {
+        let storage = state.storage.lock();
+        storage.base_dir().to_path_buf()
+    };
+    services::inpaint::delete_model(&dir, &id)
+}
+
+/// 区域修复（去水印）：rect 为 0..1 相对坐标，选区外保留原像素
+#[tauri::command]
+pub async fn inpaint_region(
+    state: State<'_, AppState>,
+    req: InpaintRequest,
+) -> Result<ImageResponse, AppError> {
+    let bytes = base64::engine::general_purpose::STANDARD.decode(&req.image)?;
+    let dir = {
+        let storage = state.storage.lock();
+        storage.base_dir().to_path_buf()
+    };
+
+    let result = tokio::task::spawn_blocking(move || {
+        services::inpaint::run_inpaint(&dir, &bytes, (req.x, req.y, req.w, req.h), "lama")
+    })
+    .await
+    .map_err(|e| AppError::Image(e.to_string()))??;
+
+    Ok(ImageResponse {
+        image: base64::engine::general_purpose::STANDARD.encode(&result),
+        format: "PNG".into(),
+    })
 }
 
 /// 按颜色去底（魔棒/色键）

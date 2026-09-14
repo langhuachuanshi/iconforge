@@ -122,6 +122,53 @@ export function testAliyunMatting(): Promise<number> {
   return invoke('test_aliyun_matting')
 }
 
+// ---------- 去水印（LaMa 本地修复） ----------
+
+export interface InpaintModelEntry {
+  id: string
+  name: string
+  size: string
+  downloaded: boolean
+}
+
+export function listInpaintModels(): Promise<InpaintModelEntry[]> {
+  return invoke('list_inpaint_models')
+}
+
+export async function downloadInpaintModel(
+  onProgress?: (pct: number) => void
+): Promise<void> {
+  const { listen } = await import('@tauri-apps/api/event')
+
+  const unlisten = await listen<{ percent: number }>(
+    'inpaint-download-progress',
+    (event) => {
+      onProgress?.(event.payload.percent)
+    }
+  )
+
+  try {
+    await invoke('download_inpaint_model', { id: 'lama' })
+  } finally {
+    unlisten()
+  }
+}
+
+export function deleteInpaintModel(id: string): Promise<void> {
+  return invoke('delete_inpaint_model', { id })
+}
+
+export async function inpaintRegion(params: {
+  image: string
+  x: number
+  y: number
+  w: number
+  h: number
+}): Promise<string> {
+  const result = await invoke<{ image: string }>('inpaint_region', { req: params })
+  return result.image
+}
+
 export async function cropImage(params: CropParams): Promise<string> {
   const result = await invoke<{ image: string }>('crop_image', { req: params })
   return result.image

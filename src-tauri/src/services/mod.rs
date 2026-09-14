@@ -6,3 +6,4 @@ pub mod aliyun_sign;
 pub mod aliyun_imageseg;
 pub mod extract;
 pub mod convert;
+pub mod inpaint;

@@ -13,6 +13,9 @@ import {
   adjustColor,
   downloadBgModel,
   listBgModels,
+  listInpaintModels,
+  downloadInpaintModel,
+  inpaintRegion,
   getConfig,
   setConfig,
   savePng,
@@ -20,6 +23,7 @@ import {
   toDataUrl,
   blobToBase64,
   type BgModelEntry,
+  type InpaintModelEntry,
 } from '../api/client'
 import { useWorkspaceStore } from '../stores/workspace'
 
@@ -36,6 +40,13 @@ const bgModels = ref<BgModelEntry[]>([])
 const currentBgModelId = ref('')
 
 const downloadedBgModels = computed(() => bgModels.value.filter(m => m.downloaded))
+
+// ── 去水印（LaMa 本地修复）──
+const inpaintModels = ref<InpaintModelEntry[]>([])
+const inpaintDownloading = ref(false)
+const inpaintPct = ref(0)
+// 修复选区（画面百分比），默认覆盖右下角"千问AI生成"类水印
+const wmRect = ref({ x: 60, y: 84, w: 40, h: 16 })
 
 // ── 抠图引擎（local 本地模型 / cloud 云端 remove.bg）──
 const engine = ref<'local' | 'cloud'>('local')
@@ -241,7 +252,7 @@ function onCanvasMouseUp() {
 }
 
 // ── 工具状态机（统一管理所有工具的激活状态，PS 风格）──
-type ToolId = 'crop' | 'removeColor' | 'removeBg' | 'touchup' | 'smartCrop' | 'edgeRefine' | 'shapeMask' | 'adjustColor'
+type ToolId = 'crop' | 'removeColor' | 'removeBg' | 'touchup' | 'watermark' | 'smartCrop' | 'edgeRefine' | 'shapeMask' | 'adjustColor'
 const activeTool = ref<ToolId | null>(null)
 
 // 左侧工具栏列表（顺序 = 显示顺序）
@@ -265,6 +276,7 @@ const toolGroups: { label: string; items: { id: ToolId; name: string; icon: stri
   {
     label: '调整',
     items: [
+      { id: 'watermark', name: '去水印', icon: 'BrushFilled' },
       { id: 'edgeRefine', name: '边缘净化', icon: 'Filter' },
       { id: 'shapeMask', name: '形状遮罩', icon: 'PieChart' },
       { id: 'adjustColor', name: '调色', icon: 'Sunny' },
@@ -775,6 +787,7 @@ function goToSettings() {
 
 onMounted(loadBgModels)
 onMounted(loadEngineConfig)
+onMounted(loadInpaintModels)
 
 // keep-alive 下每次进入编辑页都重新自适应窗口（图可能换了、或窗口尺寸变了）
 onActivated(() => {
@@ -1032,6 +1045,45 @@ async function handleAdjustColor() {
   } catch (e: any) { ElMessage.error(`调色失败：${e?.message || e}`) } finally { processing.value = false }
 }
 
+// ── 去水印（LaMa 本地修复）──
+async function loadInpaintModels() {
+  try {
+    inpaintModels.value = await listInpaintModels()
+  } catch (e: any) {
+    console.error('加载修复模型清单失败:', e)
+  }
+}
+
+async function handleDownloadInpaintModel() {
+  inpaintDownloading.value = true; inpaintPct.value = 0
+  try {
+    await downloadInpaintModel(pct => { inpaintPct.value = Math.round(pct) })
+    await loadInpaintModels()
+    ElMessage.success('下载完成')
+  } catch (e: any) { ElMessage.error(`下载失败：${e?.message || e}`) }
+  finally { inpaintDownloading.value = false }
+}
+
+async function handleInpaint() {
+  if (!image.value) return
+  const model = inpaintModels.value.find(x => x.downloaded)
+  if (!model) {
+    try {
+      await ElMessageBox.confirm('修复模型未下载（约 208MB，仅首次），是否下载？', '下载模型', {
+        confirmButtonText: '下载', cancelButtonText: '取消', type: 'info'
+      })
+    } catch { return }
+    await handleDownloadInpaintModel()
+    if (!inpaintModels.value.some(x => x.downloaded)) return
+  }
+  pushHistory(); processing.value = true
+  try {
+    const { x, y, w, h } = wmRect.value
+    syncImage(await inpaintRegion({ image: image.value, x: x / 100, y: y / 100, w: w / 100, h: h / 100 }))
+    ElMessage.success('去水印完成')
+  } catch (e: any) { ElMessage.error(`去水印失败：${e?.message || e}`) } finally { processing.value = false }
+}
+
 // ── computed ──
 const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}px) scale(${scale.value})`)
 </script>
@@ -1182,6 +1234,18 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
         <div class="canvas-bg checkerboard" />
         <img :src="toDataUrl(image)" class="canvas-img" :style="{ transform: imageTransform, ...shapeClipStyle }" draggable="false" />
 
+        <!-- 去水印选区框（跟随图片 transform，百分比定位） -->
+        <div
+          v-if="activeTool === 'watermark' && imgNatural.w"
+          class="wm-overlay"
+          :style="{ transform: imageTransform, width: imgNatural.w + 'px', height: imgNatural.h + 'px' }"
+        >
+          <div
+            class="wm-rect"
+            :style="{ left: wmRect.x + '%', top: wmRect.y + '%', width: wmRect.w + '%', height: wmRect.h + '%' }"
+          />
+        </div>
+
         <!-- 吸管光标 + 放大镜（DOM 跟随，比 SVG cursor 丝滑；吸色态且鼠标在画布上时显示） -->
         <div
           v-show="eyedropperActive && eyedropperCursor.visible"
@@ -1326,6 +1390,72 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
             </el-button>
             <p class="tool-desc">阿里云分割抠图，需联网，约 0.002 元/次</p>
           </template>
+        </div>
+
+        <!-- 去水印 -->
+        <div v-else-if="activeTool === 'watermark'" class="drawer-section">
+          <div class="bg-model-picker">
+            <span class="tool-desc">修复模型</span>
+            <el-select
+              :model-value="(inpaintModels.find(m => m.downloaded) || inpaintModels[0])?.id"
+              size="small"
+              style="width:100%; margin-top:4px"
+              disabled
+            >
+              <el-option
+                v-for="m in inpaintModels"
+                :key="m.id"
+                :value="m.id"
+                :label="m.downloaded ? `${m.name}（已下载）` : `${m.name}（未下载 · ${m.size}）`"
+              />
+            </el-select>
+          </div>
+          <el-button
+            v-if="!inpaintModels.some(m => m.downloaded)"
+            :disabled="inpaintDownloading"
+            @click="handleDownloadInpaintModel"
+            style="width:100%; margin-top:8px"
+          >
+            {{ inpaintDownloading ? `下载中 ${inpaintPct}%` : '下载修复模型' }}
+          </el-button>
+          <el-progress
+            v-if="inpaintDownloading"
+            :percentage="inpaintPct"
+            :stroke-width="6"
+            style="margin-top:8px"
+          />
+
+          <el-divider />
+          <span class="tool-desc">修复选区（画面百分比）</span>
+          <div class="param" style="margin-top:6px">
+            <span class="tool-desc">左边距：{{ wmRect.x }}%</span>
+            <el-slider v-model="wmRect.x" :min="0" :max="99" size="small" />
+          </div>
+          <div class="param">
+            <span class="tool-desc">上边距：{{ wmRect.y }}%</span>
+            <el-slider v-model="wmRect.y" :min="0" :max="99" size="small" />
+          </div>
+          <div class="param">
+            <span class="tool-desc">宽度：{{ wmRect.w }}%</span>
+            <el-slider v-model="wmRect.w" :min="1" :max="100" size="small" />
+          </div>
+          <div class="param">
+            <span class="tool-desc">高度：{{ wmRect.h }}%</span>
+            <el-slider v-model="wmRect.h" :min="1" :max="100" size="small" />
+          </div>
+          <div class="btn-row" style="margin-top:4px">
+            <el-button size="small" @click="wmRect = { x: 60, y: 84, w: 40, h: 16 }">右下角水印预设</el-button>
+          </div>
+
+          <el-button
+            type="primary"
+            :disabled="processing || !image || !inpaintModels.some(m => m.downloaded)"
+            @click="handleInpaint"
+            style="width:100%; margin-top:8px"
+          >
+            <el-icon><BrushFilled /></el-icon> 开始修复
+          </el-button>
+          <p class="tool-desc">选区外像素不变；适合右下角固定水印（如"千问AI生成"）</p>
         </div>
 
         <!-- 智能裁剪 -->
@@ -1492,6 +1622,15 @@ const imageTransform = computed(() => `translate(${panX.value}px, ${panY.value}p
 
 /* 形状遮罩九宫格辅助线（叠加在图片上，跟随 transform） */
 .shape-grid { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 3; }
+
+/* 去水印选区框 */
+.wm-overlay { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 3; }
+.wm-rect {
+  position: absolute;
+  border: 2px dashed var(--el-color-primary);
+  background: rgba(64, 158, 255, 0.15);
+  box-sizing: border-box;
+}
 .shape-grid-h { position: absolute; left: 0; right: 0; border-top: 1px dashed rgba(255,255,255,0.7); }
 .shape-grid-v { position: absolute; top: 0; bottom: 0; border-left: 1px dashed rgba(255,255,255,0.7); }
 

@@ -297,6 +297,28 @@ pub struct BgModelEntry {
     pub current: bool,
 }
 
+/// 去水印模型清单条目
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InpaintModelEntry {
+    pub id: String,
+    pub name: String,
+    pub size: String,
+    pub downloaded: bool,
+}
+
+/// 去水印请求（rect 为 0..1 相对坐标）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InpaintRequest {
+    /// base64 编码的 PNG
+    pub image: String,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
 /// 新增/更新服务商请求
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
