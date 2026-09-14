@@ -48,11 +48,21 @@ fn with_cached_session<T>(
     };
     if stale {
         let start = std::time::Instant::now();
+        // 显式用满逻辑核：实测默认线程数只到一半性能（16 核机器 5.1s → 全核 ~3s）
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
         let sess = Session::builder()
             .map_err(|e| AppError::Image(format!("创建 Session 失败: {e}")))?
+            .with_intra_threads(threads)
+            .map_err(|e| AppError::Image(format!("设置线程数失败: {e}")))?
             .commit_from_file(model_path)
             .map_err(|e| AppError::Image(format!("加载模型失败: {e}")))?;
-        log::info!("[Inpaint] 模型加载 {}ms", start.elapsed().as_millis());
+        log::info!(
+            "[Inpaint] 模型加载 {}ms（{} 线程）",
+            start.elapsed().as_millis(),
+            threads
+        );
         *guard = Some((model_path.to_path_buf(), stamp, sess));
     }
     f(&mut guard.as_mut().expect("cache just filled").2)
